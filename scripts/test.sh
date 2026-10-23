@@ -7,6 +7,8 @@ TMPDIR=$(mktemp -d "$ROOT/.harness-test.XXXXXX")
 export TMPDIR
 trap 'rm -rf "$TMPDIR"' EXIT HUP INT TERM
 node plugins/harness/scripts/session-start.mjs --self-test
+# 回到现场的每条用例都要能红：逐条打变异，自测必须失败。
+node scripts/mutation-check.mjs
 python3 plugins/harness/scripts/context-watch.py --self-test
 if command -v claude >/dev/null 2>&1; then
   # 校验 CLI 的配置、缓存也隔离在工作树内。

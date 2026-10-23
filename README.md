@@ -6,9 +6,11 @@
 - Stop：按峰值上下文占窗口的比例提醒写交接卡；45% 软提示一次，70% 硬提示每次都响，仅输出 `systemMessage`，不阻止停止。
 - `/harness:relay <任务卡路径>`：核对收口条件，就地更新交接节，生成不超过 15 行的开场 prompt，由维护者自行开新会话。
 
+0.3.0 起 SessionStart 最上面多一段「回到现场」，整体输出不超过 4800 字符（三段各自限长）。见下文。
+
 0.2.0 加一个技能 `project-methodology`（调用名 `harness:project-methodology`）：方法论资产的取用指针，源目录默认 `~/code/web2/keel/docs/方法论`，可用 `HARNESS_METHODOLOGY_DIR` 覆盖。
 
-不包含议程命令、走查派单，也不包含 multi-ai 入口技能：那份技能的上游源在 multi-ai 仓 `integration/skills/multi-ai`，由 multi-ai 自己安装，本仓不另存副本。判据见方法论《项目记忆模型与工作流循环》§四。
+不包含议程命令（议程只在开会话时摘要显示）、走查派单，也不包含 multi-ai 入口技能：那份技能的上游源在 multi-ai 仓 `integration/skills/multi-ai`，由 multi-ai 自己安装，本仓不另存副本。判据见方法论《项目记忆模型与工作流循环》§四。
 
 安装（由维护者执行）：
 
@@ -29,6 +31,13 @@ SessionStart 读取 `AI_LEDGER_FILE`，默认 `~/.local/state/ai-ledger/events.j
 
 这是 Keel `scripts/collaboration/ai-ledger.mjs` 之外的第二份账本读者，有判据漂移风险，升级任一实现时应对照复核。running / lost / unknown 三态判据与参考实现一致（0.2.1 起）；仍有的差异：参考实现 `list --open` 默认按 48 小时过滤（含 running），本插件 running 不限时、lost 与 unknown 限 24 小时；异常事件序列（finish 后又出现 start）本插件按最后一条事件判。读账本暂不迁 multi-ai：Keel 那份同时是夜间全量的记账与等待工具，迁走读者也删不掉它的判据。
 
+「回到现场」从任务卡目录摘要（依次找 `docs/协作/任务`、`docs/tasks`、`tasks`，都没有就输出一行「未找到任务卡目录」）：
+
+- 活跃卡：前 30 行里有 `- 状态：active|waiting` 的卡，且近 3 天有提交或未提交（没有 git 时按文件修改时间）；最多列 6 张，余下只列名字。每张一行：上次定了什么（标题含「已定/答复/裁决」的节里最后一条带原话或日期的条目，没有这种节就退到最后一条「原话：「…」」；只有日期没有时间）、此后动过本卡的提交数（按决定日 0 点起算，不是全仓提交数）、等你什么（第一个交接节里的「仍需拍板 / 待维护者定 / 等维护者」行，交接节没写时取全卡第一条）。
+- 议程未收口：标题含「议程」的节里表格最后一格不是「已定/完成/不做/搁置…」的行，以及全卡未勾的 `- [ ]`。
+- 你现在可以做：第一个交接节或未勾项里写了「待维护者走查/看/验收」的行，以及有几张卡在等你回答；都没有就写「没有要你做的」。
+- 每张卡只读开头 256KB；代码围栏里的内容不算。卡里没更新的，摘出来的就是过期的，钩子判断不了。
+
 Git 子进程清除继承的 `GIT_*` 环境变量，并设置 `GIT_OPTIONAL_LOCKS=0`，防止 status 刷新索引。非 git 目录输出「非 git 目录，跳过」，适用于 mb 等没有 git 的项目。读取错误作为中文诊断输出，生产 hook 始终零退出。
 
 Stop 脚本保留 Keel 原实现：按 session_id 在 `~/.claude/projects` 下找日志，取 input、cache creation、cache read 之和的峰值。窗口依次取当前目录的项目 local settings、项目 settings、用户 settings 的 `autoCompactWindow`，否则用明确标注为假设的 1000000。不额外消费 `transcript_path` 或 `stop_hook_active`；软档印记位于 `$TMPDIR/harness-context-watch`（TMPDIR 未设置时用 `/tmp`），不在插件目录里写状态。
@@ -39,6 +48,6 @@ Stop 脚本保留 Keel 原实现：按 session_id 在 `~/.claude/projects` 下�
 sh scripts/test.sh
 ```
 
-测试临时文件在本工作树创建并清理，不写 Git 元数据。SessionStart 自测覆盖 running、lost、过期及边界、finish 与重复 id、坏行、缺失账本、非 git 降级及环境污染、真实未提交改动、15 条截断、跨主机、空账本、异常、输出长度、ledger-only；每个场景含负向断言。非 git 测试只读使用文件系统根目录；真实 Git 测试在现有工作树创建一个临时未跟踪文件。
+测试临时文件在本工作树创建并清理，不写 Git 元数据。SessionStart 自测覆盖回到现场（活跃卡筛选、已定提取与前缀、提交计数、第一个交接节与围栏、议程与未勾、你现在可以做的三种情形、无卡目录与无 git 降级、截断与读取上限、还没有提交的仓；在临时目录里建独立小仓，提交时间可控）、running、lost、过期及边界、finish 与重复 id、坏行、缺失账本、非 git 降级及环境污染、真实未提交改动、15 条截断、跨主机、空账本、异常、输出长度、ledger-only；每个场景含负向断言。`scripts/mutation-check.mjs` 对回到现场逐条打 22 处变异，每处必须恰好命中一次且让自测变红，确认用例不是一开始就绿。非 git 测试只读使用文件系统根目录；真实 Git 测试在现有工作树创建一个临时未跟踪文件。
 
 Stop 原有八个自测覆盖低于阈值、软档、硬档、取峰值、无 usage、软档降噪、硬档重复提醒和无日志。存在 `claude` 时还会校验插件与 marketplace；不存在时明确打印跳过。自测失败返回非零，生产 hook 的兜底行为不受影响。
