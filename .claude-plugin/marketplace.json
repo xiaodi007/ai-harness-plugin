@@ -1,0 +1,7 @@
+{
+  "name": "ai-harness",
+  "owner": { "name": "ai-harness maintainers" },
+  "plugins": [
+    { "name": "harness", "source": "./plugins/harness" }
+  ]
+}
