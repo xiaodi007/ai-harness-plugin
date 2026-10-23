@@ -6,7 +6,9 @@
 - Stop：按峰值上下文占窗口的比例提醒写交接卡；45% 软提示一次，70% 硬提示每次都响，仅输出 `systemMessage`，不阻止停止。
 - `/harness:relay <任务卡路径>`：核对收口条件，就地更新交接节，生成不超过 15 行的开场 prompt，由维护者自行开新会话。
 
-不包含技能、议程命令或走查派单。判据见方法论《项目记忆模型与工作流循环》§四。
+0.2.0 加一个技能 `project-methodology`（调用名 `harness:project-methodology`）：方法论资产的取用指针，源目录默认 `~/code/web2/keel/docs/方法论`，可用 `HARNESS_METHODOLOGY_DIR` 覆盖。
+
+不包含议程命令、走查派单，也不包含 multi-ai 入口技能：那份技能的上游源在 multi-ai 仓 `integration/skills/multi-ai`，由 multi-ai 自己安装，本仓不另存副本。判据见方法论《项目记忆模型与工作流循环》§四。
 
 安装（由维护者执行）：
 
@@ -21,7 +23,7 @@ claude plugin install harness@ai-harness
 claude --plugin-dir ./plugins/harness
 ```
 
-装上后需撤掉 Keel 仓 `.claude/settings.json` 中原来的 Stop 钩子，否则旧脚本和插件脚本两份都会跑。本仓测试不安装插件、不修改 `~/.claude`。
+装上后需撤掉 Keel 仓 `.claude/settings.json` 中原来的 Stop 钩子，否则旧脚本和插件脚本两份都会跑。同时删掉 `~/.claude/skills/project-methodology`，否则同一个技能有两份。本仓测试不安装插件、不修改 `~/.claude`。
 
 SessionStart 读取 `AI_LEDGER_FILE`，默认 `~/.local/state/ai-ledger/events.jsonl`，只读不写；`--ledger-only` 只输出账本段。每个 id 取最后一条 start/finish 事件，finish 不报；本机存活 PID（含 EPERM）为 running，其他为 lost。running 全报，lost 仅保留 24 小时内，每段最多展示 15 条。长字段用省略号截断，另报超出条数；输出不能当作完整账本。只看得见经 multi-ai 记账的活；直接敲 codex 或别的机器上的活看不见（账本已有的跨主机记录显示 lost，不能据此断言远端进程已停）。
 
