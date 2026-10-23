@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const BOUNDARY = '只看得见经 multi-ai 记账的活；直接敲 codex 或别的机器上的活看不见';
 const DAY = 24 * 60 * 60 * 1000;
+const LOST_HOURS = 12;
 const OUTPUT_LIMIT = 4800;
 const clean = (value) => String(value ?? '').replace(/[\r\n\t\x00-\x1f\x7f]/g, ' ');
 const clip = (value, limit) => {
@@ -46,7 +47,8 @@ function ledgerSection(file, now = Date.now()) {
     const jobs = [...latest.values()].filter((event) => event.event === 'start')
       // 与 Keel ai-ledger.mjs 的 fold 同判据：别的机器或没有 pid 的活本机判不了死活，记 unknown。
       .map((event) => ({ ...event, status: event.host !== hostname() || !Number.isInteger(event.pid) ? 'unknown' : alive(event.pid) ? 'running' : 'lost' }))
-      .filter((job) => job.status === 'running' || now - Date.parse(job.at) < DAY)
+      // lost 过了 12 小时维护者已处理不了，只剩噪音；账本本身不动。
+      .filter((job) => job.status === 'running' || now - Date.parse(job.at) < (job.status === 'lost' ? LOST_HOURS * 3600000 : DAY))
       .sort((a, b) => String(a.at).localeCompare(String(b.at)));
     body = jobs.length ? jobs.slice(0, 15).map((job) => {
       const full = `${job.status} ${clean(job.id)}｜${clean(job.what)}｜${clean(job.cwd)}${job.card ? `｜卡 ${clean(job.card)}` : ''}｜开始于${age(job.at, now)}`;
@@ -90,10 +92,16 @@ function gitSection(cwd) {
 const CARD_DIRS = ['docs/协作/任务', 'docs/tasks', 'tasks'];
 const RECENT_DAYS = 3;
 const MAX_CARDS = 6;
+const LANES = 3;
 const CARD_READ_LIMIT = 256 * 1024;
+const STATUS_READ_LIMIT = 4096;
 const ACTIVE_RE = /^[-*]\s*状态\s*[:：]\s*(active|waiting)\b/;
+// 写的一端定的两种行：「维护者定（MM-DD）：…」和交接节里的「等你：…」（问时写、答完删）。读不到才猜，并标「（猜）」。
+const DECIDED_LINE = /^\s*(?:(?:[-*]|\d+\.)\s+)?(?:\*\*)?维护者定[（(](\d{1,2})-(\d{1,2})[）)](?:\*\*)?\s*[:：]\s*(.+)$/;
+const ASK_LINE = /^\s*(?:(?:[-*]|\d+\.)\s+)?(?:\*\*)?等你(?:\*\*)?\s*[:：]\s*(.+)$/;
+const NONE_RE = /^无(?:[。.；;，,\s]|$)/;
 const DECIDED_HEADING = /已定|答复|裁决/;
-const WAIT_RE = /^[-*]\s*(?:\*\*)?(?:仍需拍板|待维护者定|待维护者拍板|等维护者|需要维护者决定|等你)(?:\*\*)?\s*[:：]\s*(.*)$/;
+const WAIT_RE = /^[-*]\s*(?:\*\*)?(?:仍需拍板|待维护者定|待维护者拍板|等维护者|需要维护者决定)(?:\*\*)?\s*[:：]\s*(.*)$/;
 const TODO_RE = /(?:待|等)(?:维护者|你)[^，。；：:]{0,6}(?:走查|过目|验收|手验|看)/;
 const CLOSED_RE = /^(?:已定|已完成|完成|done|不做|搁置|已收口|收口|已撤|取消|✅|☑)/i;
 const plain = (text) => clean(text).replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\*\*|`/g, '').trim();
@@ -107,16 +115,25 @@ const gist = (text) => {
 };
 const dateIn = (text) => text.match(/(?:20\d\d-)?(\d{1,2})-(\d{1,2})/);
 
-function readHead(file) {
+function readHead(file, limit = CARD_READ_LIMIT) {
   const fd = openSync(file, 'r');
   try {
-    const buffer = Buffer.alloc(CARD_READ_LIMIT);
-    return buffer.toString('utf8', 0, readSync(fd, buffer, 0, CARD_READ_LIMIT, 0));
+    const buffer = Buffer.alloc(limit);
+    return buffer.toString('utf8', 0, readSync(fd, buffer, 0, limit, 0));
   } finally { closeSync(fd); }
 }
 
+// 近几天没动、却还标着 active/waiting 的卡：只读开头几 KB 判状态，按文件名倒序（新建的在前）。
+function staleCards(root, dir, recent) {
+  return readdirSync(resolve(root, dir)).filter((name) => name.endsWith('.md') && name !== 'README.md')
+    .map((name) => `${dir}/${name}`).filter((path) => !recent.includes(path))
+    .filter((path) => readHead(resolve(root, path), STATUS_READ_LIMIT).split('\n').slice(0, 30).some((line) => ACTIVE_RE.test(line)))
+    .sort().reverse();
+}
+
 function parseCard(text) {
-  const card = { status: '', decision: null, waiting: null, agenda: [], unchecked: [], todo: [] };
+  const card = { status: '', decision: null, waiting: null, asks: [], agenda: [], unchecked: [], todo: [] };
+  let marked = null;
   let heading = '';
   let inHandoff = false;
   let handoffs = 0;
@@ -138,6 +155,13 @@ function parseCard(text) {
       return;
     }
     if (index < 30 && !card.status) card.status = line.match(ACTIVE_RE)?.[1] ?? '';
+    const mark = line.match(DECIDED_LINE);
+    if (mark && plain(mark[3])) marked = { text: plain(mark[3]), date: [Number(mark[1]), Number(mark[2])] };
+    const ask = inHandoff && line.match(ASK_LINE);
+    if (ask && plain(ask[1])) {
+      if (NONE_RE.test(plain(ask[1]))) card.askNone = true;
+      else card.asks.push(plain(ask[1]));
+    }
     const wait = line.match(WAIT_RE);
     if (wait && plain(wait[1]) && (inHandoff ? !card.waiting?.handoff : !card.waiting)) card.waiting = { text: plain(wait[1]), handoff: inHandoff };
     const bullet = line.match(/^ ?(?:[-*]|\d+\.)\s+(.*)$/);
@@ -155,10 +179,13 @@ function parseCard(text) {
   });
   // 没有「已定/答复/裁决」节的卡，退到最后一条带原话的条目。
   const decision = decided.findLast((item) => /「/.test(item.text) || dateIn(item.text)) ?? decided.at(-1) ?? quoted;
-  if (decision) {
+  if (marked) card.decision = { ...marked, guess: false };
+  else if (decision) {
     const date = dateIn(decision.text) ?? dateIn(decision.heading);
-    card.decision = { text: gist(plain(decision.text)), date: date ? [Number(date[1]), Number(date[2])] : null };
+    card.decision = { text: gist(plain(decision.text)), date: date ? [Number(date[1]), Number(date[2])] : null, guess: true };
   }
+  // 「等你」：有定格式的行只认它们；没有才退到交接节的旧写法，算猜的。
+  if (!card.asks.length && card.waiting && !NONE_RE.test(card.waiting.text)) card.guessedAsk = card.waiting.text;
   return card;
 }
 
@@ -198,27 +225,42 @@ function commitsSince(root, path, [month, day], now) {
   return log.status === 0 ? log.stdout.split('\n').filter(Boolean).length : null;
 }
 
-function sceneSection(cwd, now = Date.now()) {
+const asking = (card) => card.asks.length > 0 || Boolean(card.guessedAsk);
+const askText = (card) => card.asks.length
+  ? `等你 ${card.asks.length} 条：${card.asks.slice(0, 2).map((ask) => clip(ask, 40)).join('；')}${card.asks.length > 2 ? ' 等' : ''}`
+  : card.guessedAsk ? `等你（猜）：${clip(card.guessedAsk, 50)}` : card.askNone || card.waiting ? '等你：无' : '等你：卡里没写';
+const cardName = (path) => basename(path, '.md').replace(/^\d{4}-\d{2}-\d{2}-/, '');
+
+// 返回给模型的全文和给维护者界面的三行摘要（等你几条、WIP 超没超、最该先做的一件）。
+function sceneParts(cwd, now = Date.now()) {
   try {
     const probe = git(cwd, ['rev-parse', '--show-toplevel']);
     const inGit = probe.status === 0 && Boolean(probe.stdout.trim());
     const root = inGit ? probe.stdout.trim() : cwd;
     const dir = cardDir(root);
-    if (!dir) return `回到现场\n未找到任务卡目录（找过 ${CARD_DIRS.join('、')}），跳过`;
+    if (!dir) return { text: `回到现场\n未找到任务卡目录（找过 ${CARD_DIRS.join('、')}），跳过`, summary: ['回到现场：未找到任务卡目录，跳过'] };
     const cards = [];
-    for (const path of recentCards(root, dir, inGit, now)) {
+    const recent = recentCards(root, dir, inGit, now);
+    for (const path of recent) {
       const card = parseCard(readHead(resolve(root, path)));
-      if (card.status) cards.push({ ...card, path, name: basename(path, '.md').replace(/^\d{4}-\d{2}-\d{2}-/, '') });
+      if (card.status) cards.push({ ...card, path, name: cardName(path) });
     }
+    // 要你回答的卡排前面，免得被截进「另有 N 张」；写明的「等你」排在猜的前面。
+    const rank = (card) => (card.asks.length ? 2 : card.guessedAsk ? 1 : 0);
+    cards.sort((a, b) => rank(b) - rank(a));
+    const stale = staleCards(root, dir, recent);
     const shown = cards.slice(0, MAX_CARDS);
-    const lines = ['回到现场', `活跃卡 ${cards.length} 张（状态 active/waiting，近 ${RECENT_DAYS} 天${inGit ? '有提交或未提交' : '文件改过'}）`];
+    const over = cards.length > LANES;
+    const wip = `${over ? 'WIP 超限' : 'WIP 未超'}：近 ${RECENT_DAYS} 天在动的活跃卡 ${cards.length} 张，${over ? `超过 ${LANES} 条泳道` : `泳道上限 ${LANES}`}`;
+    const lines = ['回到现场', `活跃卡 ${cards.length} 张（状态 active/waiting，近 ${RECENT_DAYS} 天${inGit ? '有提交或未提交' : '文件改过'}）`, wip];
+    if (stale.length) lines.push(clip2(`可能该关：${stale.length} 张标着 active/waiting 但近 ${RECENT_DAYS} 天没动，如 ${stale.slice(0, 8).map((path) => clip(cardName(path), 14)).join('、')}${stale.length > 8 ? ' 等' : ''}`, 240));
     for (const card of shown) {
       const decision = card.decision
-        ? `上次定「${clip(card.decision.text, 46)}」${card.decision.date ? `(${card.decision.date.join('-')})` : '(没写日期)'}`
+        ? `上次定${card.decision.guess ? '（猜）' : ''}「${clip(card.decision.text, 46)}」${card.decision.date ? `(${card.decision.date.join('-')})` : '(没写日期)'}`
         : '卡里没找到已定';
       const commits = inGit && card.decision?.date ? commitsSince(root, card.path, card.decision.date, now) : null;
       const after = commits === null ? '' : `；之后 ${commits} 个提交动过本卡`;
-      lines.push(clip2(`· ${clip(card.name, 18)}［${card.status}］：${decision}${after}；等你：${card.waiting ? clip(card.waiting.text, 50) : '卡里没写'}`, 220));
+      lines.push(clip2(`· ${clip(card.name, 18)}［${card.status}］：${decision}${after}；${askText(card)}`, 220));
     }
     if (cards.length > MAX_CARDS) lines.push(clip2(`另有 ${cards.length - MAX_CARDS} 张：${cards.slice(MAX_CARDS).map((card) => clip(card.name, 14)).join('、')}`, 240));
     lines.push('议程未收口');
@@ -232,16 +274,29 @@ function sceneSection(cwd, now = Date.now()) {
     }
     lines.push('你现在可以做');
     const todo = shown.flatMap((card) => card.todo.map((line) => `· ${clip(card.name, 18)}：${clip(line, 70)}`));
-    const asks = shown.filter((card) => card.waiting && !/^无/.test(card.waiting.text)).length;
+    const askCards = cards.filter(asking);
+    const asks = askCards.length;
     lines.push(...todo.slice(0, 3));
     if (asks) lines.push(`· 回答 ${asks} 张卡的「等你」`);
     if (!todo.length && !asks) lines.push('没有要你做的');
-    lines.push('只认卡里写下的：交接节的「仍需拍板/待维护者定」「待维护者走查/看」；卡没更新就会过期');
-    return lines.join('\n');
-  } catch (error) { return `回到现场\n${failure('任务卡', error)}`; }
+    lines.push('只认卡里写下的：「维护者定（MM-DD）：」和交接节「等你：」两种行，读不到才猜并标（猜）；卡没更新就会过期');
+    const askCount = askCards.reduce((sum, card) => sum + (card.asks.length || 1), 0);
+    const guessed = askCards.filter((card) => !card.asks.length).length;
+    const first = askCards[0];
+    const next = first ? `先做：答「${clip(first.name, 18)}」${first.asks.length ? '' : '（猜）'}：${clip(first.asks[0] ?? first.guessedAsk, 60)}`
+      : todo.length ? `先做：${todo[0].slice(2)}`
+      : over || stale.length ? '先做：把做完的活跃卡改成 done，收到 3 张以内' : '先做：没有要你做的';
+    const summary = [
+      asks ? `回到现场：等你 ${askCount} 条（${asks} 张卡${guessed ? `，其中 ${guessed} 张是猜的` : ''}）` : '回到现场：没有等你回答的',
+      `${wip}${stale.length ? `；另有 ${stale.length} 张久没动，可能该关` : ''}`,
+      next,
+    ];
+    return { text: lines.join('\n'), summary };
+  } catch (error) { return { text: `回到现场\n${failure('任务卡', error)}`, summary: [`回到现场：${failure('任务卡', error)}`] }; }
 }
+const sceneSection = (cwd, now) => sceneParts(cwd, now).text;
 
-function render(raw, { file = process.env.AI_LEDGER_FILE || resolve(homedir(), '.local/state/ai-ledger/events.jsonl'), ledgerOnly = false } = {}) {
+function compose(raw, { file = process.env.AI_LEDGER_FILE || resolve(homedir(), '.local/state/ai-ledger/events.jsonl'), ledgerOnly = false } = {}) {
   let cwd = process.cwd();
   let diagnostic = '';
   try {
@@ -252,10 +307,21 @@ function render(raw, { file = process.env.AI_LEDGER_FILE || resolve(homedir(), '
       cwd = input.cwd;
     }
   } catch (error) { diagnostic = failure('输入', error) + '\n'; }
+  const found = ledgerOnly ? null : sceneParts(cwd);
   // 三段分开限长，哪段再长也挤不掉别的段。
   const output = ledgerOnly ? diagnostic + clip2(ledgerSection(file), 1600)
-    : diagnostic + clip2(sceneSection(cwd), 1800) + '\n\n' + clip2(ledgerSection(file), 1600) + '\n\n' + clip2(gitSection(cwd), 1250);
-  return output.slice(0, OUTPUT_LIMIT - 1) + '\n';
+    : diagnostic + clip2(found.text, 1800) + '\n\n' + clip2(ledgerSection(file), 1600) + '\n\n' + clip2(gitSection(cwd), 1250);
+  return { text: output.slice(0, OUTPUT_LIMIT - 1) + '\n', summary: found?.summary ?? [] };
+}
+const render = (raw, options) => compose(raw, options).text;
+
+// SessionStart 的纯文本 stdout 只进模型上下文，界面上看不到；systemMessage 才显示给维护者（官方 hooks 文档，实测见 README）。
+const RELAY = '维护者界面上只看得到下面三行摘要。本会话第一条回复开头，先用不超过 3 行转述这三行（等你几条、WIP 超没超、最该先做的一件），再回答维护者。';
+function hookOutput(raw, options) {
+  const { text, summary } = compose(raw, options);
+  if (!summary.length) return text;
+  const message = summary.map((line) => clip(line, 120)).join('\n');
+  return JSON.stringify({ systemMessage: message, hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: `${RELAY}\n${message}\n\n${text}` } }) + '\n';
 }
 
 function selfTest() {
@@ -280,9 +346,11 @@ function selfTest() {
       write([start('dead', { pid: dead })]);
       assert.match(show(), /lost dead/); assert.doesNotMatch(show(), /running dead/);
     });
-    check('24 小时外及恰好 24 小时的 lost 不报', () => {
-      write([start('stale', { pid: dead, at: new Date(now - 2 * DAY).toISOString() }), start('edge', { pid: dead, at: new Date(now - DAY).toISOString() }), start('visible')]);
-      assert.doesNotMatch(show(), /stale|edge/); assert.match(show(), /running visible/);
+    check('12 小时外及恰好 12 小时的 lost 不报，unknown 仍留 24 小时', () => {
+      const hours = (h) => new Date(now - h * 3600000).toISOString();
+      write([start('stale', { pid: dead, at: hours(48) }), start('edge', { pid: dead, at: hours(12) }), start('half', { pid: dead, at: hours(13) }),
+        start('fresh', { pid: dead, at: hours(11) }), start('far', { host: hostname() + '-other', at: hours(13) }), start('visible')]);
+      assert.doesNotMatch(show(), /stale|edge|half/); assert.match(show(), /running visible/); assert.match(show(), /lost fresh/); assert.match(show(), /unknown far/);
     });
     check('finish 不报，按最后事件折叠', () => {
       write([start('done'), { event: 'finish', id: 'done' }, start('again'), { event: 'finish', id: 'again' }, start('again')]);
@@ -367,22 +435,22 @@ function selfTest() {
     check('回到现场：只列近期改过的 active/waiting 卡（含未提交）', () => {
       const out = scene();
       assert.match(out, /活跃卡 3 张/); assert.match(out, /· 甲［active］/); assert.match(out, /· 乙［waiting］/); assert.match(out, /· 戊［active］/);
-      assert.doesNotMatch(out, /丙|丁|README/);
+      assert.doesNotMatch(out, /· 丙|· 丁|丙、|README/); assert.match(out, /可能该关：1 张[^\n]*如 丁$/m);
     });
     check('回到现场：上次定取已定节最后一条带原话的，没有已定节退到原话', () => {
       const out = scene();
-      assert.ok(out.includes(`上次定「新决定照推荐」(${ymd(now - 2 * DAY)})`), out);
-      assert.doesNotMatch(out, /旧决定|追认/); assert.ok(out.includes('上次定「只做启动预热」'), out);
+      assert.ok(out.includes(`上次定（猜）「新决定照推荐」(${ymd(now - 2 * DAY)})`), out);
+      assert.doesNotMatch(out, /旧决定|追认/); assert.ok(out.includes('上次定（猜）「只做启动预热」'), out);
       assert.match(out, /· 戊［active］：卡里没找到已定/);
       assert.equal(parseCard('## 已定\n\n- 会话记录延长保留。原话：「延长吧」。已改设置（10-23）\n').decision.text, '会话记录延长保留。原话：「延长吧」');
-      assert.deepEqual(parseCard('## 维护者裁决（10-21 晚）\n\n第三轮拍板：「索引按推荐删」，其余不做\n').decision, { text: '索引按推荐删', date: [10, 21] });
+      assert.deepEqual(parseCard('## 维护者裁决（10-21 晚）\n\n第三轮拍板：「索引按推荐删」，其余不做\n').decision, { text: '索引按推荐删', date: [10, 21], guess: true });
     });
     check('回到现场：之后的提交只数决定日起动过本卡的', () => {
       assert.match(scene(), /· 甲［active］：[^\n]*之后 2 个提交动过本卡/); assert.doesNotMatch(scene(), /之后 3 个提交/);
     });
     check('回到现场：等你只认第一个交接节，围栏里的不算', () => {
       const out = scene();
-      assert.match(out, /甲[^\n]*等你：要不要推送/); assert.doesNotMatch(out, /旧问题|围栏里/); assert.match(out, /乙[^\n]*等你：卡里没写/);
+      assert.match(out, /甲[^\n]*等你（猜）：要不要推送/); assert.doesNotMatch(out, /旧问题|围栏里/); assert.match(out, /乙[^\n]*等你：卡里没写/);
     });
     check('回到现场：议程只列没收口的行和未勾项', () => {
       const out = scene();
@@ -419,11 +487,84 @@ function selfTest() {
       for (let i = 0; i < 10; i++) many.put(`2026-01-${10 + i}-卡${i}.md`, active('active', `- 仍需拍板：${'长'.repeat(400)}`));
       many.put('2026-01-01-巨.md', active('active', 'x'.repeat(256 * 1024) + '\n## 交接\n\n- 仍需拍板：尾巴\n'));
       const out = sceneSection(many.root, now);
-      assert.match(out, /活跃卡 11 张/); assert.match(out, /另有 5 张：/); assert.match(out, /· 巨［active］/); assert.doesNotMatch(out, /尾巴/);
+      assert.match(out, /活跃卡 11 张/); assert.match(out, /另有 5 张：[^\n]*巨/); assert.match(out, /回答 10 张卡/); assert.doesNotMatch(out, /尾巴/);
       assert.ok(out.split('\n').every((line) => line.length <= 240));
       const full = render(JSON.stringify({ cwd: many.root }), { file });
       assert.ok(full.length <= OUTPUT_LIMIT); assert.ok(full.indexOf('回到现场') < full.indexOf('在跑的外部活') && full.indexOf('在跑的外部活') < full.indexOf('未提交改动'));
       assert.doesNotMatch(render(JSON.stringify({ cwd: many.root }), { file, ledgerOnly: true }), /回到现场/);
+    });
+    check('两种定格式行：维护者定取最后一条且不标猜，等你只认第一个交接节、「无」不算、有了就不退到旧写法', () => {
+      const card = parseCard([
+        '- 状态：active', '## 已定', '- 「猜出来的」（10-20）', '维护者定（10-21）：先做甲', '- **维护者定（10-22）**：再做乙',
+        '```', '维护者定（10-23）：围栏里', '```', '## 交接', '- 等你：要不要推送', '- 等你：无', '- 仍需拍板：旧写法', '等你：第二件',
+        '### 更早的交接', '- 等你：旧的', '## 别的节', '- 等你：交接节外',
+      ].join('\n'));
+      assert.deepEqual(card.decision, { text: '再做乙', date: [10, 22], guess: false });
+      assert.deepEqual(card.asks, ['要不要推送', '第二件']); assert.equal(card.guessedAsk, undefined);
+      assert.equal(parseCard('## 交接\n\n- 等你：无。\n- 仍需拍板：无\n').guessedAsk, undefined);
+      assert.equal(parseCard('## 交接\n\n- 等你：无\n').askNone, true);
+      const repo = makeRepo('fmt');
+      repo.put('2026-01-01-定.md', active('active', `维护者定（${ymd(now - DAY)}）：照推荐\n\n## 交接\n\n- 等你：甲\n- 等你：乙\n- 等你：丙\n`), now - 3600000);
+      repo.put('2026-01-02-猜.md', active('active', '## 交接\n\n- 仍需拍板：旧问题\n'), now - 3600000);
+      repo.put('2026-01-03-答完.md', active('active', '## 交接\n\n- 等你：无\n'), now - 3600000);
+      const out = sceneSection(repo.root, now);
+      assert.ok(out.includes(`上次定「照推荐」(${ymd(now - DAY)})；之后 1 个提交动过本卡；等你 3 条：甲；乙 等`), out);
+      assert.match(out, /· 猜［active］：卡里没找到已定；等你（猜）：旧问题/); assert.match(out, /· 答完［active］：[^\n]*等你：无$/m);
+      assert.doesNotMatch(out, /上次定（猜）「照推荐」/);
+    });
+    check('要你回答的卡排前面，不被截进「另有 N 张」', () => {
+      const repo = makeRepo('order');
+      repo.put('2026-01-01-要答.md', active('active', '## 交接\n\n- 等你：定一下\n'), now - 2 * 3600000);
+      for (let i = 0; i < 7; i++) repo.put(`2026-01-1${i}-闲${i}.md`, active('active', ''), now - 3600000 + i);
+      const out = sceneSection(repo.root, now);
+      assert.match(out, /活跃卡 8 张/); assert.match(out, /\n· 要答［active］/); assert.doesNotMatch(out, /另有 2 张：[^\n]*要答/);
+    });
+    check('WIP：超过 3 张直说超限，近 3 天没动的活跃卡列可能该关（done 与近期的不列）', () => {
+      const repo = makeRepo('wip');
+      repo.put('2026-01-01-旧活.md', active('active', ''), now - 10 * DAY);
+      repo.put('2026-01-02-旧完.md', active('done', ''), now - 10 * DAY);
+      repo.put('2026-01-03-旧等.md', active('waiting', ''), now - 9 * DAY);
+      for (let i = 0; i < 3; i++) repo.put(`2026-01-1${i}-新${i}.md`, active('active', ''), now - 3600000 + i);
+      const calm = sceneParts(repo.root, now);
+      assert.match(calm.text, /WIP 未超：近 3 天在动的活跃卡 3 张，泳道上限 3/); assert.doesNotMatch(calm.text, /超限/);
+      assert.match(calm.text, /可能该关：2 张[^\n]*如 旧等、旧活$/m); assert.doesNotMatch(calm.text, /可能该关[^\n]*(旧完|新)/);
+      repo.put('2026-01-19-新9.md', active('active', ''), now - 3600000);
+      const busy = sceneParts(repo.root, now);
+      assert.match(busy.text, /WIP 超限：近 3 天在动的活跃卡 4 张，超过 3 条泳道/);
+      assert.match(busy.summary[1], /^WIP 超限：[^\n]*；另有 2 张久没动，可能该关$/);
+    });
+    check('界面三行摘要：等你几条（猜的张数）、WIP、先做按 等你 > 待走查 > 关卡 > 没有', () => {
+      const repo = makeRepo('sum');
+      repo.put('2026-01-01-甲.md', active('active', '## 交接\n\n- 等你：推不推\n- 等你：删不删\n- 待维护者走查：页面 abc\n'), now - 3600000);
+      repo.put('2026-01-02-乙.md', active('active', '## 交接\n\n- 仍需拍板：旧写法\n'), now - 3600000);
+      const both = sceneParts(repo.root, now).summary;
+      assert.equal(both.length, 3);
+      assert.equal(both[0], '回到现场：等你 3 条（2 张卡，其中 1 张是猜的）');
+      assert.match(both[1], /^WIP 未超/); assert.equal(both[2], '先做：答「甲」：推不推');
+      repo.put('2026-01-01-甲.md', active('active', '## 交接\n\n- 待维护者走查：页面 abc\n'), now - 3000000);
+      repo.put('2026-01-02-乙.md', active('active', ''), now - 3000000);
+      const look = sceneParts(repo.root, now).summary;
+      assert.equal(look[0], '回到现场：没有等你回答的'); assert.equal(look[2], '先做：甲：待维护者走查：页面 abc');
+      repo.put('2026-01-01-甲.md', active('active', ''), now - 2000000);
+      assert.equal(sceneParts(repo.root, now).summary[2], '先做：没有要你做的');
+      // 提交按时间先后：git log --since 遇到更早的提交就停止回溯。
+      const old = makeRepo('sum-old');
+      old.put('2026-01-05-老.md', active('active', ''), now - 10 * DAY);
+      old.put('2026-01-06-新.md', active('active', ''), now - 3600000);
+      const close = sceneParts(old.root, now).summary;
+      assert.equal(close[2], '先做：把做完的活跃卡改成 done，收到 3 张以内'); assert.match(close[1], /另有 1 张久没动/);
+    });
+    check('钩子输出：systemMessage 是三行摘要，additionalContext 带转述要求和全文；ledger-only 仍是纯文本', () => {
+      const repo = makeRepo('hook');
+      repo.put('2026-01-01-甲.md', active('active', '## 交接\n\n- 等你：推不推\n'), now - 3600000);
+      const output = JSON.parse(hookOutput(JSON.stringify({ cwd: repo.root }), { file }));
+      assert.equal(output.systemMessage.split('\n').length, 3); assert.match(output.systemMessage, /^回到现场：等你 1 条（1 张卡）\n/);
+      assert.equal(output.hookSpecificOutput.hookEventName, 'SessionStart');
+      const context = output.hookSpecificOutput.additionalContext;
+      assert.ok(context.startsWith(RELAY + '\n' + output.systemMessage + '\n\n回到现场\n'), context);
+      assert.match(context, /在跑的外部活/); assert.match(context, /未提交改动/);
+      const ledger = hookOutput('{}', { file, ledgerOnly: true });
+      assert.throws(() => JSON.parse(ledger)); assert.match(ledger, /^在跑的外部活/);
     });
     console.log(`session-start：${count} 个场景通过（均含负向断言）`);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
@@ -433,6 +574,6 @@ if (process.argv.includes('--self-test')) {
   // 测试失败应可被测试入口发现；生产 hook 的异常始终以零退出。
   selfTest();
 } else {
-  try { process.stdout.write(render(readFileSync(0, 'utf8'), { ledgerOnly: process.argv.includes('--ledger-only') })); }
-  catch (error) { process.stdout.write(failure('输入', error) + '\n'); }
+  try { process.stdout.write(hookOutput(readFileSync(0, 'utf8'), { ledgerOnly: process.argv.includes('--ledger-only') })); }
+  catch (error) { process.stdout.write(JSON.stringify({ systemMessage: failure('回到现场', error) }) + '\n'); }
 }
