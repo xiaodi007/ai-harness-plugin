@@ -300,7 +300,7 @@ function sceneParts(cwd, now = Date.now(), { file = DEFAULT_LEDGER() } = {}) {
     const lines = ['回到现场', `活跃卡 ${cards.length} 张（状态 active/waiting，近 ${RECENT_DAYS} 天${inGit ? '有提交或未提交' : '文件改过'}）`, wip];
     for (const lane of (lanesOpen ?? []).slice(0, 8)) lines.push(clip2(`· ${lane.text}`, 160));
     if (lanesOpen && lanesOpen.length > 8) lines.push(`· 另有 ${lanesOpen.length - 8} 条泳道`);
-    if (stale.length) lines.push(clip2(`可能该关：${stale.length} 张标着 active/waiting 但近 ${RECENT_DAYS} 天没动，如 ${stale.slice(0, 8).map((path) => clip(cardName(path), 14)).join('、')}${stale.length > 8 ? ' 等' : ''}`, 240));
+    if (stale.length) lines.push(clip2(`停着的未完成：${stale.length} 张标着 active/waiting、近 ${RECENT_DAYS} 天没动，如 ${stale.slice(0, 8).map((path) => clip(cardName(path), 14)).join('、')}${stale.length > 8 ? ' 等' : ''}`, 240));
     for (const card of shown) {
       const decision = card.decision
         ? `上次定${card.decision.guess ? '（猜）' : ''}「${clip(card.decision.text, 46)}」${card.decision.date ? `(${card.decision.date.join('-')})` : '(没写日期)'}`
@@ -336,10 +336,10 @@ function sceneParts(cwd, now = Date.now(), { file = DEFAULT_LEDGER() } = {}) {
     const next = first ? `先做：答「${clip(first.name, 18)}」：${clip(first.asks[0], 60)}`
       : todo.length ? `先做：${todo[0].slice(2)}`
       : over ? `先做：实施泳道超过 ${LANES} 条，先收一条再开新的`
-      : stale.length ? '先做：把做完的旧卡改成 done' : '先做：没有要你做的';
+      : stale.length ? '先做：没有要你做的；想接着做，从停着的未完成里挑一张' : '先做：没有要你做的';
     const summary = [
       `${written.length ? `回到现场：等你 ${askCount} 条（${written.length} 张卡）` : '回到现场：没有写明等你的'}${guessed ? `；另有 ${guessed} 张卡没按格式写，不算` : ''}`,
-      `${wip}${stale.length ? `；另有 ${stale.length} 张卡久没动，可能该关` : ''}`,
+      `${wip}${stale.length ? `；另有 ${stale.length} 张停着的未完成（近 ${RECENT_DAYS} 天没动）` : ''}`,
       next,
     ];
     return { text: lines.join('\n'), summary };
@@ -487,7 +487,7 @@ function selfTest() {
     check('回到现场：只列近期改过的 active/waiting 卡（含未提交）', () => {
       const out = scene();
       assert.match(out, /活跃卡 3 张/); assert.match(out, /· 甲［active］/); assert.match(out, /· 乙［waiting］/); assert.match(out, /· 戊［active］/);
-      assert.doesNotMatch(out, /· 丙|· 丁|丙、|README/); assert.match(out, /可能该关：1 张[^\n]*如 丁$/m);
+      assert.doesNotMatch(out, /· 丙|· 丁|丙、|README/); assert.match(out, /停着的未完成：1 张[^\n]*如 丁$/m);
     });
     check('回到现场：上次定取已定节最后一条带原话的，没有已定节退到原话', () => {
       const out = scene();
@@ -572,7 +572,7 @@ function selfTest() {
       const out = sceneSection(repo.root, now);
       assert.match(out, /活跃卡 8 张/); assert.match(out, /\n· 要答［active］/); assert.doesNotMatch(out, /另有 2 张：[^\n]*要答/);
     });
-    check('WIP 数实施泳道不数卡：账本 running＋有未提交或未合入提交的工作树，同目录只算一条；久没动的卡列可能该关', () => {
+    check('WIP 数实施泳道不数卡：账本 running＋有未提交或未合入提交的工作树，同目录只算一条；久没动的卡列停着的未完成', () => {
       const repo = makeRepo('wip');
       repo.put('2026-01-01-旧活.md', active('active', ''), now - 10 * DAY);
       repo.put('2026-01-02-旧完.md', active('done', ''), now - 10 * DAY);
@@ -589,16 +589,16 @@ function selfTest() {
       assert.match(calm.text, /活跃卡 5 张/); assert.match(calm.text, /WIP 未超：实施泳道 2 条（账本在跑的活＋有未合入改动的工作树），上限 3/);
       assert.match(calm.text, /^· 工作树 wip-ahead：未合入 1 个提交$/m); assert.match(calm.text, /^· 工作树 wip-dirty：未提交 1 条；在跑 in-tree$/m);
       assert.doesNotMatch(calm.text, /wip-idle|gone|工作树 wip：|超限/);
-      assert.match(calm.text, /可能该关：2 张[^\n]*如 旧等、旧活$/m); assert.doesNotMatch(calm.text, /可能该关[^\n]*(旧完|新)/);
+      assert.match(calm.text, /停着的未完成：2 张[^\n]*如 旧等、旧活$/m); assert.doesNotMatch(calm.text, /停着的未完成[^\n]*(旧完|新)|可能该关/);
       jobs(start('in-tree', { cwd: resolve(dirty, 'sub') }), start('far', { cwd: '/elsewhere' }));
       repo.put('2026-01-20-未提交.md', active('waiting', ''));
       const busy = sceneParts(repo.root, now);
       assert.match(busy.text, /WIP 超限：实施泳道 4 条[^\n]*超过上限 3/); assert.match(busy.text, /^· 在跑 far｜任务-far｜\/elsewhere$/m); assert.match(busy.text, /^· 工作树 wip：未提交 1 条$/m);
-      assert.match(busy.summary[1], /^WIP 超限：实施泳道 4 条[^\n]*；另有 2 张卡久没动，可能该关$/);
+      assert.match(busy.summary[1], /^WIP 超限：实施泳道 4 条[^\n]*；另有 2 张停着的未完成（近 3 天没动）$/);
       assert.equal(busy.summary[2], '先做：实施泳道超过 3 条，先收一条再开新的');
       rmSync(ledger);
     });
-    check('界面三行摘要：等你只数写明的（猜的只报张数、不进先做）、WIP、先做按 等你 > 待走查 > 泳道超限 > 关卡 > 没有', () => {
+    check('界面三行摘要：等你只数写明的（猜的只报张数、不进先做）、WIP、先做按 等你 > 待走查 > 泳道超限 > 没有（停着的未完成只提示挑一张，不叫改 done）', () => {
       const repo = makeRepo('sum');
       repo.put('2026-01-01-甲.md', active('active', '## 交接\n\n- 等你：推不推\n- 等你：删不删\n- 待维护者走查：页面 abc\n'), now - 3600000);
       // 猜的卡提交更晚、本该排前，写明的仍排在它前面。
@@ -623,7 +623,7 @@ function selfTest() {
       old.put('2026-01-05-老.md', active('active', ''), now - 10 * DAY);
       old.put('2026-01-06-新.md', active('active', ''), now - 3600000);
       const close = sceneParts(old.root, now).summary;
-      assert.equal(close[2], '先做：把做完的旧卡改成 done'); assert.match(close[1], /另有 1 张卡久没动/);
+      assert.equal(close[2], '先做：没有要你做的；想接着做，从停着的未完成里挑一张'); assert.match(close[1], /另有 1 张停着的未完成/); assert.doesNotMatch(close.join('\n'), /done|可能该关/);
     });
     check('钩子输出：systemMessage 是三行摘要，additionalContext 带转述要求和全文；ledger-only 仍是纯文本', () => {
       const repo = makeRepo('hook');
