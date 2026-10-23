@@ -25,9 +25,9 @@ claude --plugin-dir ./plugins/harness
 
 装上后需撤掉 Keel 仓 `.claude/settings.json` 中原来的 Stop 钩子，否则旧脚本和插件脚本两份都会跑。同时删掉 `~/.claude/skills/project-methodology`，否则同一个技能有两份。本仓测试不安装插件、不修改 `~/.claude`。
 
-SessionStart 读取 `AI_LEDGER_FILE`，默认 `~/.local/state/ai-ledger/events.jsonl`，只读不写；`--ledger-only` 只输出账本段。每个 id 取最后一条 start/finish 事件，finish 不报；本机存活 PID（含 EPERM）为 running，其他为 lost。running 全报，lost 仅保留 24 小时内，每段最多展示 15 条。长字段用省略号截断，另报超出条数；输出不能当作完整账本。只看得见经 multi-ai 记账的活；直接敲 codex 或别的机器上的活看不见（账本已有的跨主机记录显示 lost，不能据此断言远端进程已停）。
+SessionStart 读取 `AI_LEDGER_FILE`，默认 `~/.local/state/ai-ledger/events.jsonl`，只读不写；`--ledger-only` 只输出账本段。每个 id 取最后一条 start/finish 事件，finish 不报；别的机器或没有 pid 的记录为 unknown（本机判不了死活）；本机存活 PID（含 EPERM）为 running，其他为 lost。running 全报，lost 与 unknown 仅保留 24 小时内，每段最多展示 15 条。长字段用省略号截断，另报超出条数；输出不能当作完整账本。只看得见经 multi-ai 记账的活；直接敲 codex 或别的机器上的活看不见。
 
-这是 Keel `scripts/collaboration/ai-ledger.mjs` 之外的第二份账本读者，有判据漂移风险，升级任一实现时应对照复核。当前参考实现的 `list --open` 会把跨主机记录标为 unknown，默认按 48 小时过滤，并在事件折叠中保留 finish；本插件按 v1 任务书采用上述最后事件、lost 和 24 小时规则。正常本机 start/finish 的运行判据一致，异常事件序列及跨主机、时间过滤存在这些明确差异。
+这是 Keel `scripts/collaboration/ai-ledger.mjs` 之外的第二份账本读者，有判据漂移风险，升级任一实现时应对照复核。running / lost / unknown 三态判据与参考实现一致（0.2.1 起）；仍有的差异：参考实现 `list --open` 默认按 48 小时过滤（含 running），本插件 running 不限时、lost 与 unknown 限 24 小时；异常事件序列（finish 后又出现 start）本插件按最后一条事件判。读账本暂不迁 multi-ai：Keel 那份同时是夜间全量的记账与等待工具，迁走读者也删不掉它的判据。
 
 Git 子进程清除继承的 `GIT_*` 环境变量，并设置 `GIT_OPTIONAL_LOCKS=0`，防止 status 刷新索引。非 git 目录输出「非 git 目录，跳过」，适用于 mb 等没有 git 的项目。读取错误作为中文诊断输出，生产 hook 始终零退出。
 

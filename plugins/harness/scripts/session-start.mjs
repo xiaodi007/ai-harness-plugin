@@ -43,7 +43,8 @@ function ledgerSection(file, now = Date.now()) {
       } catch { /* 坏行不影响其余事件。 */ }
     }
     const jobs = [...latest.values()].filter((event) => event.event === 'start')
-      .map((event) => ({ ...event, status: event.host === hostname() && alive(event.pid) ? 'running' : 'lost' }))
+      // 与 Keel ai-ledger.mjs 的 fold 同判据：别的机器或没有 pid 的活本机判不了死活，记 unknown。
+      .map((event) => ({ ...event, status: event.host !== hostname() || !Number.isInteger(event.pid) ? 'unknown' : alive(event.pid) ? 'running' : 'lost' }))
       .filter((job) => job.status === 'running' || now - Date.parse(job.at) < DAY)
       .sort((a, b) => String(a.at).localeCompare(String(b.at)));
     body = jobs.length ? jobs.slice(0, 15).map((job) => {
@@ -161,9 +162,9 @@ function selfTest() {
       write(Array.from({ length: 17 }, (_, i) => start(`job-${i}`)));
       assert.match(show(), /另有 2 条/); assert.match(show(), /running job-14｜/); assert.doesNotMatch(show(), /running job-15｜/);
     });
-    check('跨主机判 lost、空账本与异常可见、ledger-only 和长度上限', () => {
+    check('跨主机判 unknown、空账本与异常可见、ledger-only 和长度上限', () => {
       write([start('remote', { host: hostname() + '-other' })]);
-      assert.match(show(), /lost remote/); assert.doesNotMatch(show(), /running remote/);
+      assert.match(show(), /unknown remote/); assert.doesNotMatch(show(), /(running|lost) remote/);
       write([]); assert.match(show(), /账本里没有在跑的活/); assert.doesNotMatch(show(), /账本不存在/);
       assert.match(ledgerSection(tmp), /harness：账本读取失败/);
       write(Array.from({ length: 17 }, (_, i) => start('x'.repeat(100) + i, { what: '文'.repeat(300), cwd: '/'.repeat(300), card: '卡'.repeat(300) })));
