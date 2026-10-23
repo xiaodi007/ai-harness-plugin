@@ -1,5 +1,5 @@
 {
   "name": "harness",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "会话开场、上下文收尾提醒与接力命令。"
 }
