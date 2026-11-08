@@ -133,9 +133,12 @@ function readHead(file, limit = CARD_READ_LIMIT) {
   } finally { closeSync(fd); }
 }
 
+// 卡文件：README 和 _ 开头的模板不算（与 card-check、foundation 同口径）。
+const isCard = (name) => name.endsWith('.md') && name !== 'README.md' && !name.startsWith('_');
+
 // 近几天没动、却还标着 active/waiting 的卡：只读开头几 KB 判状态，按文件名倒序（新建的在前）。
 function staleCards(root, dir, recent) {
-  return readdirSync(resolve(root, dir)).filter((name) => name.endsWith('.md') && name !== 'README.md')
+  return readdirSync(resolve(root, dir)).filter(isCard)
     .map((name) => `${dir}/${name}`).filter((path) => !recent.includes(path))
     .filter((path) => readHead(resolve(root, path), STATUS_READ_LIMIT).split('\n').slice(0, 30).some((line) => ACTIVE_RE.test(line)))
     .sort().reverse();
@@ -209,7 +212,7 @@ function cardDir(root) {
 // 近期改过的卡，新的在前：有 git 时按未提交改动和近几天的提交，没有 git 时按文件修改时间。
 function recentCards(root, dir, inGit, now) {
   const order = [];
-  const add = (path) => { if (path.endsWith('.md') && basename(path) !== 'README.md' && !order.includes(path)) order.push(path); };
+  const add = (path) => { if (isCard(basename(path)) && !order.includes(path)) order.push(path); };
   if (inGit) {
     const status = git(root, ['-c', 'core.quotePath=false', 'status', '--porcelain', '-uall', '--', dir]);
     if (status.status !== 0) throw new Error(status.stderr || `git 退出 ${status.status}`);
@@ -510,12 +513,13 @@ function selfTest() {
     big.put('2026-01-02-乙.md', active('waiting', `- 结论。原话：「只做启动预热」（${ymd(now - DAY)}）\n\n\`\`\`\n- 仍需拍板：围栏里\n\`\`\`\n`), now - 3600000);
     big.put('2026-01-03-丙.md', active('done', '- 仍需拍板：丙的问题'), now - 3600000);
     big.put('README.md', active('active', ''), now - 3600000);
+    big.put('_模板.md', active('active', ''), now - 3600000);
     big.put('2026-01-05-戊.md', active('active', ''));
     const scene = () => sceneSection(big.root, now);
     check('回到现场：只列近期改过的 active/waiting 卡（含未提交）', () => {
       const out = scene();
       assert.match(out, /活跃卡 3 张/); assert.match(out, /· 甲［active］/); assert.match(out, /· 乙［waiting］/); assert.match(out, /· 戊［active］/);
-      assert.doesNotMatch(out, /· 丙|· 丁|丙、|README/); assert.match(out, /停着的未完成：1 张[^\n]*如 丁$/m);
+      assert.doesNotMatch(out, /· 丙|· 丁|丙、|README|模板/); assert.match(out, /停着的未完成：1 张[^\n]*如 丁$/m);
     });
     check('回到现场：上次定取已定节最后一条带原话的，没有已定节退到原话', () => {
       const out = scene();

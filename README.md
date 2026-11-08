@@ -19,6 +19,8 @@
 - 系统地图（`docs/SYSTEM.md`「系统地图」，命令 `/harness:map`）：地基检查在有代码的已接入仓里报地图没写、路径不存在、顶层源码目录没登记（docs、tests、dist 等不算）、没写「最后核对：提交号」、核对以来改了 30 个以上文件、提交号找不到；同时报不变量表问题和没记基线的条目。
 - `/harness:tour <流程> [--guess]`：纯提示词，沿地图和不变量表讲一条链路，可先让维护者猜。
 
+0.7.1 修：SessionStart「回到现场」不再把 `_` 开头的模板卡（如 `_模板.md`）算进活跃卡，与 card-check、foundation 同口径（call 试点接入时发现）。
+
 0.6.0 加「接入与交付校验」（方法论 v1 P0-1，设计见 `~/code/web2/ai-use/设计/P0-1-接入器与任务卡.md`）：
 
 - `/harness:init`：把 `plugins/harness/templates/` 里缺的地基拷进仓库（AGENTS.md、只含 `@AGENTS.md` 的 CLAUDE.md、PROJECT.md、DECISIONS.md、docs/SYSTEM.md、任务卡 README 与 `_模板.md`、`.harness.json`），**已有文件一律不覆盖**，只给建议；已有 `docs/tasks`、`docs/协作/任务` 或 `tasks` 就沿用。落盘由 `scripts/init.mjs` 做（`--dry-run` 预演），起草 AGENTS.md 空位和立项对话由命令里的模型做，起草稿先给维护者看。
