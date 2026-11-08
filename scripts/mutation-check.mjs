@@ -1,14 +1,12 @@
 #!/usr/bin/env node
-// 「回到现场」自测的变异检查：每条变异必须真打上，并让自测变红；否则说明那条用例一开始就是绿的。
+// 自测的变异检查：每条变异必须真打上，并让对应脚本的自测变红；否则说明那条用例一开始就是绿的。
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '../plugins/harness/scripts/session-start.mjs');
-// 变异件放在原脚本旁边，脚本里按自身位置算出的仓根不变。
-const MUTANT = resolve(dirname(SCRIPT), '.mutant-session-start.mjs');
-const MUTATIONS = [
+const SCRIPTS = resolve(dirname(fileURLToPath(import.meta.url)), '../plugins/harness/scripts');
+const SESSION = [
   ['done 卡也算活跃', '(active|waiting)\\b/', '(active|waiting|done)\\b/'],
   ['近期窗口放到 30 天', '`--since=${RECENT_DAYS}.days`', '`--since=30.days`'],
   ['忽略未提交的卡', 'if (line.length > 3) add(', 'if (false) add('],
@@ -67,22 +65,79 @@ const MUTATIONS = [
   ['ledger-only 也出 JSON', '  if (!summary.length) return text;\n', ''],
   ['lost 不按 12 小时', "(job.status === 'lost' ? LOST_HOURS * 3600000 : DAY)", 'DAY'],
   ['unknown 也按 12 小时', "job.status === 'lost' ? LOST_HOURS", "job.status !== 'running' ? LOST_HOURS"],
+  ['地基告警不进摘要', "summary: warnings.length ? [`⚠ ${warnings.join('；')}`, ...summary] : summary", 'summary'],
+  ['地基告警不进全文', 'diagnostic + foundation + clip2(found.text', 'diagnostic + clip2(found.text'],
+  ['ledger-only 也查地基', 'const warnings = ledgerOnly ? [] : foundationSafe(cwd);', 'const warnings = foundationSafe(cwd);'],
 ];
 
-const source = readFileSync(SCRIPT, 'utf8');
+const CARD = [
+  ['占位当作已填', "const filled = (value) => Boolean(value) && !PLACEHOLDER.test(value.trim());", 'const filled = (value) => Boolean(value);'],
+  ['不查保住什么', "['验收剧本', '改什么', '保住什么']", "['验收剧本', '改什么']"],
+  ['不适用不要理由', "else if (/^不适用/.test(scan) && ", 'else if (false && '],
+  ['同类扫描不限字数', 'else if ([...scan].length < MIN_SCAN)', 'else if (false)'],
+  ['判定两个都写也算', 'if (root === sample)', 'if (!root && !sample)'],
+  ['证据不看等级', "if (!levels.length) problems.push('证据（没有带等级的条目）');", ''],
+  ['只有已落地也算', "else if (!levels.includes('已验证') && !levels.includes('未验证'))", 'else if (false)'],
+  ['不查类别债节', "if (findSection(map, '类别债') === undefined)", 'if (false)'],
+  ['不查别重做', "if (!filled(field(map, '交接', '别重做')))", 'if (false)'],
+  ['围栏里的也算', "if (fenced) continue;", ''],
+  ['注释里的也算', ".replace(/<!--[\\s\\S]*?-->/g, '')", ''],
+  ['豁免不看理由', 'if (match && filled(match[1])) return match[1].trim();', 'if (match) return match[1].trim();'],
+  ['豁免的卡也拦', 'if (exemption(text)) continue;', ''],
+  ['未接入也拦', 'if (!config || config.optOut) return null;', 'if (false) return null;'],
+  ['off 也管', "if (mode === 'off') return null;", ''],
+  ['每次都拦', '.filter(({ card }) => !state.blocked.includes(card))', ''],
+  ['stop_hook_active 也拦', "if (mode === 'block' && !input.stop_hook_active && fresh.length)", "if (mode === 'block' && fresh.length)"],
+  ['warn 也拦', "if (mode === 'block' && !input.stop_hook_active", "if (!input.stop_hook_active"],
+  ['旧卡也扫', 'now - stat.mtimeMs > hours * 3600000', 'false'],
+  ['模板也扫', "|| name.startsWith('_')) continue;", ') continue;'],
+  ['active 也扫', "=== 'done') out.push(path);", "!== null) out.push(path);"],
+];
+
+const FOUNDATION = [
+  ['纯文档仓也报未接入', "!/\\.(md|markdown|txt)$/i.test(path) && ", ''],
+  ['没代码也报', "return hasCode(root) ? ['本仓未接入", "return true ? ['本仓未接入"],
+  ['optOut 也报', 'if (config.optOut) return [];', ''],
+  ['不报缺文件', "if (missing.length) warnings.push(", 'if (false) warnings.push('],
+  ['不查 AGENTS 行数', 'if (lines > budgets.agentsLines)', 'if (false)'],
+  ['不查 DECISIONS 体积', 'if (kb > budgets.decisionsKB)', 'if (false)'],
+  ['done 也算进行中', "if (status === 'active' || status === 'waiting') active++;", 'if (status) active++;'],
+  ['本月的也提示归档', 'dated[1] < month', 'dated[1] <= month'],
+  ['不报大卡', 'if (big.length) warnings.push(', 'if (false) warnings.push('],
+  ['不数豁免', 'if (exempt) warnings.push(', 'if (false) warnings.push('],
+];
+
+const INIT = [
+  ['覆盖已有文件', 'if (existsSync(path)) { kept.push(target); continue; }', ''],
+  ['不沿用已有卡目录', 'cardDir || existingCardDir(root) || CARD_DEFAULT', 'cardDir || CARD_DEFAULT'],
+  ['dry-run 也写', 'if (!dryRun) { mkdirSync', 'if (true) { mkdirSync'],
+  ['不提示 CLAUDE.md', "if (!/^@AGENTS\\.md\\s*$/m.test(text)) advice.push(", 'if (false) advice.push('],
+  ['不带出熵建议', "if (!dryRun) advice.push(...foundationWarnings(root)", 'if (false) advice.push(...foundationWarnings(root)'],
+];
+
+const TARGETS = [['session-start.mjs', SESSION], ['card-check.mjs', CARD], ['foundation.mjs', FOUNDATION], ['init.mjs', INIT]];
+
 const problems = [];
-try {
-  for (const [name, from, to] of MUTATIONS) {
-    // 只替换一处并确认打上，免得变异没生效被当成「红了」或「没红」。
-    if (source.split(from).length !== 2) { problems.push(`${name}：变异点应恰好出现一次`); continue; }
-    writeFileSync(MUTANT, source.replace(from, to));
-    const result = spawnSync(process.execPath, [MUTANT, '--self-test'], { encoding: 'utf8', timeout: 60000 });
-    if (result.status === 0) problems.push(`${name}：变异后自测仍然全绿`);
-    else console.log(`  ✓ 能红：${name}`);
-  }
-} finally { rmSync(MUTANT, { force: true }); }
+let total = 0;
+for (const [file, mutations] of TARGETS) {
+  const script = resolve(SCRIPTS, file);
+  // 变异件放在原脚本旁边，脚本里按自身位置算出的仓根、相对 import 都不变；原脚本不动，中途被杀也不留脏。
+  const mutant = resolve(SCRIPTS, `.mutant-${file}`);
+  const source = readFileSync(script, 'utf8');
+  try {
+    for (const [name, from, to] of mutations) {
+      total++;
+      // 只替换一处并确认打上，免得变异没生效被当成「红了」或「没红」。
+      if (source.split(from).length !== 2) { problems.push(`${file}·${name}：变异点应恰好出现一次`); continue; }
+      writeFileSync(mutant, source.replace(from, to));
+      const result = spawnSync(process.execPath, [mutant, '--self-test'], { encoding: 'utf8', timeout: 60000 });
+      if (result.status === 0) problems.push(`${file}·${name}：变异后自测仍然全绿`);
+      else console.log(`  ✓ 能红：${file}·${name}`);
+    }
+  } finally { rmSync(mutant, { force: true }); }
+}
 if (problems.length) {
   console.error(problems.join('\n'));
   process.exit(1);
 }
-console.log(`变异检查：${MUTATIONS.length} 条变异都让自测变红`);
+console.log(`变异检查：${total} 条变异都让自测变红`);

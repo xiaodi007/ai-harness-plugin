@@ -1,6 +1,6 @@
 # ai-harness-plugin
 
-用户级 Claude Code 插件，本仓同时是本地 marketplace。v0.1.0 只做三件事：
+用户级 Claude Code 插件，本仓同时是本地 marketplace。v0.1.0 只做三件事（0.6.0 起的接入与交付校验见下文）：
 
 - SessionStart：显示外部活账本和当前工作树未提交改动，纯文本输出不超过 3000 字符。
 - Stop：按峰值上下文占窗口的比例提醒写交接卡；45% 软提示一次，70% 硬提示每次都响，仅输出 `systemMessage`，不阻止停止。
@@ -9,6 +9,13 @@
 0.3.0 起 SessionStart 最上面多一段「回到现场」，整体输出不超过 4800 字符（三段各自限长）。见下文。
 
 0.4.0 起 SessionStart 输出 JSON：`systemMessage` 是给维护者界面看的三行摘要（等你几条、WIP 超没超、最该先做的一件），`hookSpecificOutput.additionalContext` 是给模型的全文，开头要求模型在第一条回复里先转述这三行。依据官方 hooks 文档：SessionStart 的纯文本 stdout 与 `additionalContext` 只进模型上下文、界面上不显示，`systemMessage` 显示给用户；实测 `claude -p --output-format stream-json --include-hook-events` 里会话记录把它存为 `hook_system_message`。`--ledger-only` 仍输出纯文本。
+
+0.6.0 加「接入与交付校验」（方法论 v1 P0-1，设计见 `~/code/web2/ai-use/设计/P0-1-接入器与任务卡.md`）：
+
+- `/harness:init`：把 `plugins/harness/templates/` 里缺的地基拷进仓库（AGENTS.md、只含 `@AGENTS.md` 的 CLAUDE.md、PROJECT.md、DECISIONS.md、docs/SYSTEM.md、任务卡 README 与 `_模板.md`、`.harness.json`），**已有文件一律不覆盖**，只给建议；已有 `docs/tasks`、`docs/协作/任务` 或 `tasks` 就沿用。落盘由 `scripts/init.mjs` 做（`--dry-run` 预演），起草 AGENTS.md 空位和立项对话由命令里的模型做，起草稿先给维护者看。
+- SessionStart 地基检查（`scripts/foundation.mjs`）：git 仓里有非 Markdown 的跟踪文件却没有 `.harness.json` 时报「本仓未接入方法论」；已接入的报地基缺失、熵超预算（AGENTS.md 行数、DECISIONS 体积、进行中卡数，阈值读 `.harness.json` 的 `budgets`）、上月及更早的 done/dropped 卡可归档、单卡超 30KB、交付校验豁免张数。有告警时界面摘要在三行前多一行 `⚠ …`，全文最前面多一段「地基」；非 git、纯文档仓、`optOut: true`、`checks.foundation: "off"` 不报；`--ledger-only` 不带。只报警，不拦会话。
+- Stop 交付校验（`scripts/card-check.mjs --stop`）：只对有 `.harness.json` 的仓生效（从 cwd 往上找到 git 仓根）。卡目录顶层、近 6 小时改过、状态为 `done` 的卡，检查契约（验收剧本、改什么、保住什么）、同类扫描（不适用要写理由，至少 8 个字）、判定（根因修复 / 样例补丁二选一）、证据（至少一条带等级，且要有 `[已验证]` 或 `[未验证]`）、类别债节、交接的别重做；HTML 注释、代码围栏、`<…>` 占位不算填了。缺项时 `decision: block` 让模型补全；同一张卡每会话只拦一次（印记在 `$TMPDIR/harness-card-check/`），`stop_hook_active` 时只提示；`checks.cardOnDone` 为 `warn` 只提示、`off` 不管；卡里写「校验豁免：理由」跳过并被地基检查计数。`archive/`、`README.md`、`_` 开头的模板不扫。也可当 CLI：`node card-check.mjs <卡…>`，红了退出 1。`/harness:relay` 收口时对 done 卡跑一遍。
+- 已知局限：字段能挡空，挡不住敷衍（例如同类扫描写得够长但没真扫），试点里靠「扫描实际发现遗漏的比例」和维护者抽查补；Stop 只认文件修改时间，不认「本会话改的」。
 
 0.2.0 加一个技能 `project-methodology`（调用名 `harness:project-methodology`）：方法论资产的取用指针，源目录默认 `~/code/web2/keel/docs/方法论`，可用 `HARNESS_METHODOLOGY_DIR` 覆盖。
 
@@ -53,6 +60,6 @@ Stop 脚本保留 Keel 原实现：按 session_id 在 `~/.claude/projects` 下�
 sh scripts/test.sh
 ```
 
-测试临时文件在本工作树创建并清理，不写 Git 元数据。SessionStart 自测覆盖回到现场（活跃卡筛选、已定提取与前缀、提交计数、第一个交接节与围栏、议程与未勾、你现在可以做的三种情形、无卡目录与无 git 降级、截断与读取上限、还没有提交的仓、两种定格式行与（猜）、等你排序、WIP 按泳道（未合入提交、未提交改动、账本 running 并进工作树、lost 不算）与停着的未完成、界面三行摘要与先做的优先级（猜的不进）、钩子 JSON 输出；在临时目录里建独立小仓，提交时间可控）、running、lost、12 小时过期及边界（unknown 仍留 24 小时）、finish 与重复 id、坏行、缺失账本、非 git 降级及环境污染、真实未提交改动、15 条截断、跨主机、空账本、异常、输出长度、ledger-only；每个场景含负向断言。`scripts/mutation-check.mjs` 对回到现场逐条打 58 处变异（含账本 lost 的 12 小时），每处必须恰好命中一次且让自测变红，确认用例不是一开始就绿。非 git 测试只读使用文件系统根目录；真实 Git 测试在现有工作树创建一个临时未跟踪文件。
+测试临时文件在本工作树创建并清理，不写 Git 元数据。SessionStart 自测覆盖回到现场（活跃卡筛选、已定提取与前缀、提交计数、第一个交接节与围栏、议程与未勾、你现在可以做的三种情形、无卡目录与无 git 降级、截断与读取上限、还没有提交的仓、两种定格式行与（猜）、等你排序、WIP 按泳道（未合入提交、未提交改动、账本 running 并进工作树、lost 不算）与停着的未完成、界面三行摘要与先做的优先级（猜的不进）、钩子 JSON 输出；在临时目录里建独立小仓，提交时间可控）、running、lost、12 小时过期及边界（unknown 仍留 24 小时）、finish 与重复 id、坏行、缺失账本、非 git 降级及环境污染、真实未提交改动、15 条截断、跨主机、空账本、异常、输出长度、ledger-only；每个场景含负向断言。`scripts/mutation-check.mjs` 对回到现场（含地基告警接入）、交付校验、地基检查、接入器共打 97 处变异，每处必须恰好命中一次且让对应脚本的自测变红，确认用例不是一开始就绿。card-check、foundation、init 各有 `--self-test`（18、11、7 项），临时仓建在本工作树内并清理。非 git 测试只读使用文件系统根目录；真实 Git 测试在现有工作树创建一个临时未跟踪文件。
 
 Stop 原有八个自测覆盖低于阈值、软档、硬档、取峰值、无 usage、软档降噪、硬档重复提醒和无日志。存在 `claude` 时还会校验插件与 marketplace；不存在时明确打印跳过。自测失败返回非零，生产 hook 的兜底行为不受影响。

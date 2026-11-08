@@ -1,0 +1,8 @@
+{
+  "methodology": "v1",
+  "templates": "0.6.0",
+  "cardDir": "docs/tasks",
+  "budgets": { "agentsLines": 200, "decisionsKB": 100, "activeCards": 12 },
+  "checks": { "cardOnDone": "block", "foundation": "warn" },
+  "optOut": false
+}
