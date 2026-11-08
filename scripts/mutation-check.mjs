@@ -65,7 +65,7 @@ const SESSION = [
   ['ledger-only 也出 JSON', '  if (!summary.length) return text;\n', ''],
   ['lost 不按 12 小时', "(job.status === 'lost' ? LOST_HOURS * 3600000 : DAY)", 'DAY'],
   ['unknown 也按 12 小时', "job.status === 'lost' ? LOST_HOURS", "job.status !== 'running' ? LOST_HOURS"],
-  ['地基告警不进摘要', "summary: warnings.length ? [`⚠ ${warnings.join('；')}`, ...summary] : summary", 'summary'],
+  ['地基告警不进摘要', "...(warnings.length ? [`⚠ ${warnings.join('；')}`] : [])", '...[]'],
   ['地基告警不进全文', 'diagnostic + foundation + clip2(found.text', 'diagnostic + clip2(found.text'],
   ['ledger-only 也查地基', 'const warnings = ledgerOnly ? [] : foundationSafe(cwd);', 'const warnings = foundationSafe(cwd);'],
 ];
@@ -115,7 +115,88 @@ const INIT = [
   ['不带出熵建议', "if (!dryRun) advice.push(...foundationWarnings(root)", 'if (false) advice.push(...foundationWarnings(root)'],
 ];
 
-const TARGETS = [['session-start.mjs', SESSION], ['card-check.mjs', CARD], ['foundation.mjs', FOUNDATION], ['init.mjs', INIT]];
+const INVARIANTS = [
+  ['竖线转义不还原', "if (body[i] === '\\\\' && body[i + 1] === '|') { current += '|'; i++; continue; }", ''],
+  ['破折号不当空', "map((cell) => (/^[—-]$/.test(cell) ? '' : cell))", 'map((cell) => cell)'],
+  ['不查 ID 重复', "if (seen.has(row.ID)) problems.push(", 'if (false) problems.push('],
+  ['不查权威实现文件', "catch { problems.push(`${row.ID}：权威实现 ${path} 不存在`); }", 'catch { }'],
+  ['不查符号', 'if (source !== null && symbol && !source.includes(symbol))', 'if (false)'],
+  ['不限 40 条', 'if (rows.length > MAX_INVARIANTS)', 'if (false)'],
+  ['测试文档也扫', 'if (SKIP_PATH.test(file) || skip.has(file)', 'if (skip.has(file)'],
+  ['权威实现也扫', "const skip = new Set([authorityPath(row), ...exceptionPaths(row)]);", 'const skip = new Set([...exceptionPaths(row)]);'],
+  ['例外不排除', "const skip = new Set([authorityPath(row), ...exceptionPaths(row)]);", 'const skip = new Set([authorityPath(row)]);'],
+  ['命中键带行号', 'key: `${file}:${line.trim()}`', 'key: `${file}:${index}:${line.trim()}`'],
+  ['新增不报红', 'for (const hit of fresh.slice(0, 5)) problems.push(', 'for (const hit of fresh.slice(0, 0)) problems.push('],
+  ['不报未登记 ID', 'for (const id of unknown) problems.push(', 'for (const id of []) problems.push('],
+  ['基线可以变大', 'const kept = baseline[row.ID].filter((key) => keys.includes(key));', 'const kept = keys;'],
+  ['不提示存量减少', 'if (gone) stock.push(', 'if (false) stock.push('],
+  ['基线不留 gitignore', "if (!existsSync(ignore)) writeFileSync(ignore, '*\\n!.gitignore\\n!invariants-baseline.json\\n');\n  writeFileSync(path, JSON", 'writeFileSync(path, JSON'],
+];
+
+const RECEIPT = [
+  ['vitest 不算 skipped', "skipped: part('skipped') + part('todo'), parser: 'vitest'", "skipped: 0, parser: 'vitest'"],
+  ['jest 不认', "if ((m = [...text.matchAll(/^Tests:\\s+(.+total)\\s*$/gm)].at(-1)))", 'if (false)'],
+  ['pytest 不算 failed', "failed: part('failed') + part('errors?')", 'failed: 0'],
+  ['cargo 不求和', 'passed: sum.passed + Number(r[1])', 'passed: Number(r[1])'],
+  ['unittest 不扣跳过', 'passed: Number(m[1]) - skipped - failed', 'passed: Number(m[1])'],
+  ['go 不认', 'if (go.passed + go.failed + go.skipped) return', 'if (false) return'],
+  ['不去 ANSI', "replace(/\\x1b\\[[0-9;]*[A-Za-z]/g, '')", "replace(/$^/g, '')"],
+  ['0 用例不报', "if (total === 0) out.push('跑了 0 个用例');", ''],
+  ['跳过过半不报', 'else if (counts.skipped * 2 > total)', 'else if (false)'],
+  ['退出 0 有失败不报', 'if (exit === 0 && counts.failed > 0)', 'if (false)'],
+  ['FAIL 行不报', "if (exit === 0 && !counts?.failed && /^\\s*(?:FAIL|FAILED)\\b/m.test(strip(output)))", 'if (false)'],
+  ['校准回执可当证据', "if (receipt.expectFail) problems.push(", 'if (false) problems.push('],
+  ['退出码非 0 也算通过', "else if (receipt.exit !== 0) problems.push(", 'else if (false) problems.push('],
+  ['异常回执可当证据', 'if (receipt.anomalies?.length) problems.push(', 'if (false) problems.push('],
+  ['不查 HEAD 祖先', "git(root, ['merge-base', '--is-ancestor', receipt.head, 'HEAD']).status !== 0", 'false'],
+  ['启动失败记 0', 'finish(127, null, error)', 'finish(0, null, error)'],
+  ['校准摘要不分', "receipt.exit !== 0 ? ' · 校准通过", "true ? ' · 校准通过"],
+];
+
+const BRIEFS = [
+  ['不读简报字段', 'if (m && BRIEF_FIELDS.includes(m[1].trim()))', 'if (false)'],
+  ['active 也算', "if (cardStatus(text) === 'done') out.push(", 'if (cardStatus(text)) out.push('],
+  ['不看 archive', "if (rel === dir ? name === 'archive' : true) walk(path);", ''],
+  ['模板也算', "|| name.startsWith('_') || stat.mtimeMs < since) continue;", '|| stat.mtimeMs < since) continue;'],
+  ['不按时间过滤', '|| stat.mtimeMs < since) continue;', ') continue;'],
+  ['不排序', 'return out.sort((a, b) => b.at - a.at);', 'return out;'],
+  ['未接入也报', "if (!existsSync(resolve(root, '.harness.json'))) return 0;", ''],
+  ['缺字段不标', "lines.push(`- ${field}：${b[field] || '⚠ 没写'}`)", "lines.push(`- ${field}：${b[field] || ''}`)"],
+  ['标记不生效', 'writeFileSync(resolve(root, SEEN_FILE), String(now));', ''],
+];
+
+CARD.push(
+  ['简报不查', 'for (const name of BRIEF) {', 'for (const name of []) {'],
+  ['不查引用的不变量', 'if (cited.length) problems.push(...checkInvariants(', 'if (false) problems.push(...checkInvariants('],
+  ['任意编号都当不变量', ".filter((id) => prefixes.has(id.replace(/-\\d+$/, '')))", ''],
+  ['回执不核对', 'for (const id of ids) problems.push(...verifyReceipt(', 'for (const id of []) problems.push(...verifyReceipt('],
+  ['require 不要求回执', "if (!ids.length && mode === 'require' && !/人工\\s*[:：]/.test(line))", 'if (false)'],
+  ['人工不算', "&& !/人工\\s*[:：]/.test(line))", ')'],
+  ['off 也查回执', "if (mode !== 'off') {", 'if (true) {'],
+  ['Stop 不查仓库上下文', 'const problems = checkCardInRepo(text, root, config);', 'const problems = checkCard(text);'],
+);
+
+FOUNDATION.push(
+  ['不报地图空', "if (!rows.length) out.push('系统地图还没写", "if (false) out.push('系统地图还没写"],
+  ['不报地图路径不存在', 'if (missing.length) out.push(`地图里的路径不存在', 'if (false) out.push(`地图里的路径不存在'],
+  ['docs 也要登记', "!/^(docs?|tests?|__tests__|node_modules|dist|build)$/i.test(dir)", 'true'],
+  ['不报没登记的目录', 'if (uncovered.length) out.push(', 'if (false) out.push('],
+  ['不报改动过多', 'if (changed >= MAP_STALE_FILES) out.push(', 'if (false) out.push('],
+  ['不报提交号找不到', "if (diff.status !== 0) out.push(`地图「最后核对」", "if (false) out.push(`地图「最后核对」"],
+  ['不报没写最后核对', "} else out.push('地图没写「最后核对：提交号」');", '}'],
+  ['不报不变量表问题', 'if (broken.length) out.push(`不变量表', 'if (false) out.push(`不变量表'],
+  ['不报没基线', 'if (noBase.length) out.push(', 'if (false) out.push('],
+  ['没代码也报地图', "  if (!hasCode(root)) return [];\n  const out = [];", '  const out = [];'],
+);
+
+SESSION.push(
+  ['不报待看简报', '...(briefs ? [`ℹ 上次看简报以来 ${briefs} 张卡完成：/harness:brief`] : [])];\n  return', '];\n  return'],
+  ['不给工具目录', 'if (linked) notes.push(`harness 工具', 'if (false) notes.push(`harness 工具'],
+  ['optOut 也算接入', 'if (config.optOut) return null;\n    return { root', 'return { root'],
+);
+
+const TARGETS = [['session-start.mjs', SESSION], ['card-check.mjs', CARD], ['foundation.mjs', FOUNDATION], ['init.mjs', INIT],
+  ['invariants.mjs', INVARIANTS], ['receipt.mjs', RECEIPT], ['briefs.mjs', BRIEFS]];
 
 const problems = [];
 let total = 0;

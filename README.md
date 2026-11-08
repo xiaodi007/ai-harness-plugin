@@ -10,6 +10,15 @@
 
 0.4.0 起 SessionStart 输出 JSON：`systemMessage` 是给维护者界面看的三行摘要（等你几条、WIP 超没超、最该先做的一件），`hookSpecificOutput.additionalContext` 是给模型的全文，开头要求模型在第一条回复里先转述这三行。依据官方 hooks 文档：SessionStart 的纯文本 stdout 与 `additionalContext` 只进模型上下文、界面上不显示，`systemMessage` 显示给用户；实测 `claude -p --output-format stream-json --include-hook-events` 里会话记录把它存为 `hook_system_message`。`--ledger-only` 仍输出纯文本。
 
+0.7.0 加「不变量、回执、简报」（方法论 v1 P0-2～P0-4，设计见 `~/code/web2/ai-use/设计/P0-2至4-不变量-回执-简报.md`）：
+
+- 不变量与单写者（`scripts/invariants.mjs`，命令 `/harness:invariants`）：`docs/SYSTEM.md`「不变量」表每行写权威实现 `路径#符号`、指纹正则（单元格里的竖线写 `\|`，`—` 表示空）、消费者查询命令、例外（反引号路径不扫）。`check [ID…]` 查表格（ID 重复、权威实现文件或符号不存在、坏正则、超 40 条）并用指纹扫权威实现之外的源码（跳过测试、文档、生成物；命中按「文件:行文本」记，挪行号不算新增）。`baseline` 把存量记进 `.harness/invariants-baseline.json`，之后只收缩；`--accept-new ID` 才放宽。`consumers ID` 运行该行的查询命令。指纹是网不是证明：换种写法的重复实现扫不到。
+- 执行回执（`scripts/receipt.mjs`）：`node receipt.mjs [--expect-fail] -- <命令>` 自己起子进程拿真实退出码，解析 vitest、jest、pytest、unittest、cargo、node:test、go -v 的通过/失败/跳过数（认不出标未解析），报 0 用例、跳过过半、全部跳过、退出 0 却有失败或 FAIL 行；回执写 `.harness/receipts/R-MMDD-HHMM-xxx.json`，打印一行摘要，退出码透传（`--expect-fail` 反转，用来证明门禁会红）。`.harness/.gitignore` 只放过基线文件。
+- 任务卡新增「简报」五行（行为变化、决定者、保住、证据、风险），done 时必填。card-check 在有仓库上下文时另查：「触碰的规则」里和表里同前缀的 ID 必须存在、且没有新增第二处实现；`[已验证]` 引用的回执要存在、退出 0、不是校准回执、没有异常、HEAD 是当前 HEAD 的祖先。`.harness.json` 的 `checks.receipts`：`cite`（默认，引用了才核对）、`require`（每条 `[已验证]` 要带回执或写「人工：」）、`off`。
+- 简报汇总（`scripts/briefs.mjs`，命令 `/harness:brief`）：把上次看过以来（默认近 7 天，记在 `.harness/brief-seen`）done 卡的简报汇成一页，缺的字段标 ⚠；`--mark` 记为看过。SessionStart 在接入的仓里有新完成的卡时摘要多一行 `ℹ 上次看简报以来 N 张卡完成`，全文带「harness 工具：<脚本目录>」一行（插件升级后目录会变，所以不写进项目指令）。
+- 系统地图（`docs/SYSTEM.md`「系统地图」，命令 `/harness:map`）：地基检查在有代码的已接入仓里报地图没写、路径不存在、顶层源码目录没登记（docs、tests、dist 等不算）、没写「最后核对：提交号」、核对以来改了 30 个以上文件、提交号找不到；同时报不变量表问题和没记基线的条目。
+- `/harness:tour <流程> [--guess]`：纯提示词，沿地图和不变量表讲一条链路，可先让维护者猜。
+
 0.6.0 加「接入与交付校验」（方法论 v1 P0-1，设计见 `~/code/web2/ai-use/设计/P0-1-接入器与任务卡.md`）：
 
 - `/harness:init`：把 `plugins/harness/templates/` 里缺的地基拷进仓库（AGENTS.md、只含 `@AGENTS.md` 的 CLAUDE.md、PROJECT.md、DECISIONS.md、docs/SYSTEM.md、任务卡 README 与 `_模板.md`、`.harness.json`），**已有文件一律不覆盖**，只给建议；已有 `docs/tasks`、`docs/协作/任务` 或 `tasks` 就沿用。落盘由 `scripts/init.mjs` 做（`--dry-run` 预演），起草 AGENTS.md 空位和立项对话由命令里的模型做，起草稿先给维护者看。
@@ -60,6 +69,6 @@ Stop 脚本保留 Keel 原实现：按 session_id 在 `~/.claude/projects` 下�
 sh scripts/test.sh
 ```
 
-测试临时文件在本工作树创建并清理，不写 Git 元数据。SessionStart 自测覆盖回到现场（活跃卡筛选、已定提取与前缀、提交计数、第一个交接节与围栏、议程与未勾、你现在可以做的三种情形、无卡目录与无 git 降级、截断与读取上限、还没有提交的仓、两种定格式行与（猜）、等你排序、WIP 按泳道（未合入提交、未提交改动、账本 running 并进工作树、lost 不算）与停着的未完成、界面三行摘要与先做的优先级（猜的不进）、钩子 JSON 输出；在临时目录里建独立小仓，提交时间可控）、running、lost、12 小时过期及边界（unknown 仍留 24 小时）、finish 与重复 id、坏行、缺失账本、非 git 降级及环境污染、真实未提交改动、15 条截断、跨主机、空账本、异常、输出长度、ledger-only；每个场景含负向断言。`scripts/mutation-check.mjs` 对回到现场（含地基告警接入）、交付校验、地基检查、接入器共打 97 处变异，每处必须恰好命中一次且让对应脚本的自测变红，确认用例不是一开始就绿。card-check、foundation、init 各有 `--self-test`（18、11、7 项），临时仓建在本工作树内并清理。非 git 测试只读使用文件系统根目录；真实 Git 测试在现有工作树创建一个临时未跟踪文件。
+测试临时文件在本工作树创建并清理，不写 Git 元数据。SessionStart 自测覆盖回到现场（活跃卡筛选、已定提取与前缀、提交计数、第一个交接节与围栏、议程与未勾、你现在可以做的三种情形、无卡目录与无 git 降级、截断与读取上限、还没有提交的仓、两种定格式行与（猜）、等你排序、WIP 按泳道（未合入提交、未提交改动、账本 running 并进工作树、lost 不算）与停着的未完成、界面三行摘要与先做的优先级（猜的不进）、钩子 JSON 输出；在临时目录里建独立小仓，提交时间可控）、running、lost、12 小时过期及边界（unknown 仍留 24 小时）、finish 与重复 id、坏行、缺失账本、非 git 降级及环境污染、真实未提交改动、15 条截断、跨主机、空账本、异常、输出长度、ledger-only；每个场景含负向断言。`scripts/mutation-check.mjs` 对回到现场（含地基告警接入）、交付校验、地基检查、接入器共打 159 处变异（0.7.0 起含不变量、回执、简报），每处必须恰好命中一次且让对应脚本的自测变红，确认用例不是一开始就绿。card-check、foundation、init、invariants、receipt、briefs 各有 `--self-test`（24、18、7、12、8、5 项），临时仓建在本工作树内并清理。非 git 测试只读使用文件系统根目录；真实 Git 测试在现有工作树创建一个临时未跟踪文件。
 
 Stop 原有八个自测覆盖低于阈值、软档、硬档、取峰值、无 usage、软档降噪、硬档重复提醒和无日志。存在 `claude` 时还会校验插件与 marketplace；不存在时明确打印跳过。自测失败返回非零，生产 hook 的兜底行为不受影响。

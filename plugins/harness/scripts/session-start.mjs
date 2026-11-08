@@ -7,6 +7,7 @@ import { dirname, resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { foundationWarnings } from './foundation.mjs';
+import { pendingBriefs } from './briefs.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const BOUNDARY = '只看得见经 multi-ai 记账的活；直接敲 codex 或别的机器上的活看不见';
@@ -348,6 +349,18 @@ function sceneParts(cwd, now = Date.now(), { file = DEFAULT_LEDGER() } = {}) {
 }
 const sceneSection = (cwd, now) => sceneParts(cwd, now).text;
 
+const TOOLS = dirname(fileURLToPath(import.meta.url));
+// 本仓接入了（有 .harness.json 且没 optOut）才返回；顺带数待看的简报。
+function connected(cwd) {
+  try {
+    const probe = git(cwd, ['rev-parse', '--show-toplevel']);
+    const root = probe.status === 0 && probe.stdout.trim() ? probe.stdout.trim() : cwd;
+    const config = JSON.parse(readFileSync(resolve(root, '.harness.json'), 'utf8'));
+    if (config.optOut) return null;
+    return { root, briefs: pendingBriefs(root) };
+  } catch { return null; }
+}
+
 // 地基检查出错只降级成一句诊断，不影响回到现场。
 function foundationSafe(cwd) {
   try { return foundationWarnings(cwd); } catch (error) { return [failure('地基', error)]; }
@@ -366,17 +379,23 @@ function compose(raw, { file = DEFAULT_LEDGER(), ledgerOnly = false } = {}) {
   } catch (error) { diagnostic = failure('输入', error) + '\n'; }
   const found = ledgerOnly ? null : sceneParts(cwd, Date.now(), { file });
   const warnings = ledgerOnly ? [] : foundationSafe(cwd);
-  const foundation = warnings.length ? clip2(`地基\n${warnings.map((line) => `⚠ ${line}`).join('\n')}`, 600) + '\n\n' : '';
+  const linked = ledgerOnly ? null : connected(cwd);
+  const briefs = linked ? linked.briefs : 0;
+  const notes = [...warnings.map((line) => `⚠ ${line}`), ...(briefs ? [`ℹ 上次看简报以来 ${briefs} 张卡完成：/harness:brief`] : [])];
+  // 接入了的仓告诉模型工具在哪（插件升级后目录会变，不能写死进项目指令）。
+  if (linked) notes.push(`harness 工具：${TOOLS}（receipt.mjs 跑测试出回执、invariants.mjs 查不变量与消费者、briefs.mjs 汇总简报、card-check.mjs 查卡）`);
+  const foundation = notes.length ? clip2(`地基\n${notes.join('\n')}`, 900) + '\n\n' : '';
   // 各段分开限长，哪段再长也挤不掉别的段；地基告警放最前面。
   const output = ledgerOnly ? diagnostic + clip2(ledgerSection(file), 1600)
     : diagnostic + foundation + clip2(found.text, 1800) + '\n\n' + clip2(ledgerSection(file), 1600) + '\n\n' + clip2(gitSection(cwd), 1250);
   const summary = found?.summary ?? [];
-  return { text: output.slice(0, OUTPUT_LIMIT - 1) + '\n', summary: warnings.length ? [`⚠ ${warnings.join('；')}`, ...summary] : summary };
+  const head = [...(warnings.length ? [`⚠ ${warnings.join('；')}`] : []), ...(briefs ? [`ℹ 上次看简报以来 ${briefs} 张卡完成：/harness:brief`] : [])];
+  return { text: output.slice(0, OUTPUT_LIMIT - 1) + '\n', summary: [...head, ...summary] };
 }
 const render = (raw, options) => compose(raw, options).text;
 
 // SessionStart 的纯文本 stdout 只进模型上下文，界面上看不到；systemMessage 才显示给维护者（官方 hooks 文档，实测见 README）。
-const RELAY = '维护者界面上只看得到下面三行摘要（以 ⚠ 开头的是地基告警，另占一行）。本会话第一条回复开头，先用不超过 3 行转述这三行（等你几条、WIP 超没超、最该先做的一件），有地基告警时再加一行原样转述告警，然后回答维护者。';
+const RELAY = '维护者界面上只看得到下面三行摘要（以 ⚠ 开头的是地基告警、ℹ 开头的是待看简报，各占一行）。本会话第一条回复开头，先用不超过 3 行转述这三行（等你几条、WIP 超没超、最该先做的一件），有 ⚠ 或 ℹ 行时再原样转述，然后回答维护者。';
 function hookOutput(raw, options) {
   const { text, summary } = compose(raw, options);
   if (!summary.length) return text;
@@ -659,6 +678,18 @@ function selfTest() {
       writeFileSync(resolve(repo.root, '.harness.json'), '{"optOut": true}');
       const quiet = JSON.parse(hookOutput(JSON.stringify({ cwd: repo.root }), { file }));
       assert.equal(quiet.systemMessage.split('\n').length, 3); assert.doesNotMatch(quiet.hookSpecificOutput.additionalContext, /\n地基\n/);
+    });
+    check('接入后：全文带 harness 工具目录；有新完成的卡时摘要多一行 ℹ 待看简报', () => {
+      const repo = makeRepo('linked');
+      mkdirSync(resolve(repo.root, 'docs/tasks'), { recursive: true });
+      writeFileSync(resolve(repo.root, '.harness.json'), '{"cardDir": "docs/tasks"}');
+      writeFileSync(resolve(repo.root, 'AGENTS.md'), 'a\n'); writeFileSync(resolve(repo.root, 'DECISIONS.md'), 'd\n');
+      const before = JSON.parse(hookOutput(JSON.stringify({ cwd: repo.root }), { file }));
+      assert.match(before.hookSpecificOutput.additionalContext, /harness 工具：\/.+scripts（receipt\.mjs/);
+      assert.doesNotMatch(before.systemMessage, /ℹ/);
+      writeFileSync(resolve(repo.root, 'docs/tasks/2026-11-08-x.md'), '# x\n\n- 状态：done\n');
+      const after = JSON.parse(hookOutput(JSON.stringify({ cwd: repo.root }), { file }));
+      assert.match(after.systemMessage, /^ℹ 上次看简报以来 1 张卡完成：\/harness:brief\n回到现场/);
     });
     console.log(`session-start：${count} 个场景通过（均含负向断言）`);
   } finally { rmSync(tmp, { recursive: true, force: true }); }

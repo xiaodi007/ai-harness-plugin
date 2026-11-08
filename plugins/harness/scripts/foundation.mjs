@@ -7,6 +7,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { cardStatus, exemption } from './card-check.mjs';
+import { sectionTable, readInvariants, readBaseline, tableProblems, SYSTEM_FILE } from './invariants.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 export const DEFAULTS = { cardDir: 'docs/tasks', budgets: { agentsLines: 200, decisionsKB: 100, activeCards: 12, cardKB: 30 } };
@@ -77,7 +78,48 @@ export function foundationWarnings(cwd, now = new Date()) {
   if (archivable.length) warnings.push(`有 ${archivable.length} 张上月及更早的 done/dropped 卡可归档到 ${cardDir}/archive/`);
   if (big.length) warnings.push(`${big.length} 张卡超过 ${budgets.cardKB}KB，拆卡或把结论回写事实源：${big.slice(0, 3).join('、')}${big.length > 3 ? ' 等' : ''}`);
   if (exempt) warnings.push(`交付校验豁免 ${exempt} 张卡`);
+  warnings.push(...systemWarnings(root));
   return warnings;
+}
+
+const MAP_STALE_FILES = 30;
+// 地图路径单元格：反引号或逗号、顿号、空格分隔的多个路径。
+const mapPaths = (cell) => cell.replace(/`/g, '').split(/[,，、\s]+/).map((p) => p.trim().replace(/\/+$/, '')).filter((p) => p && p !== '—' && !p.startsWith('<'));
+
+// 系统地图过期与不变量表健康；只对有代码的已接入仓报。
+export function systemWarnings(root) {
+  let text;
+  try { text = readFileSync(resolve(root, SYSTEM_FILE), 'utf8'); } catch { return []; }
+  if (!hasCode(root)) return [];
+  const out = [];
+  const rows = sectionTable(text, '系统地图');
+  if (!rows.length) out.push('系统地图还没写（/harness:map 起草）');
+  else {
+    const paths = rows.flatMap((row) => mapPaths(row['路径'] ?? ''));
+    const missing = paths.filter((path) => !existsSync(resolve(root, path)));
+    if (missing.length) out.push(`地图里的路径不存在：${missing.slice(0, 4).join('、')}${missing.length > 4 ? ' 等' : ''}`);
+    const listed = git(root, ['ls-files', '-z']);
+    const tops = new Set(listed.status === 0 ? listed.stdout.split('\0').filter((file) => file.includes('/')).map((file) => file.split('/')[0]) : []);
+    const uncovered = [...tops].filter((dir) => !dir.startsWith('.') && !/^(docs?|tests?|__tests__|node_modules|dist|build)$/i.test(dir))
+      .filter((dir) => !paths.some((path) => path === dir || path.startsWith(`${dir}/`) || dir.startsWith(`${path}/`))).sort();
+    if (uncovered.length) out.push(`地图没登记的顶层目录：${uncovered.slice(0, 5).join('、')}${uncovered.length > 5 ? ' 等' : ''}`);
+    const sha = text.match(/^最后核对\s*[:：]\s*([0-9a-f]{7,40})\b/m)?.[1];
+    if (sha) {
+      const diff = git(root, ['diff', '--name-only', sha, 'HEAD']);
+      if (diff.status !== 0) out.push(`地图「最后核对」的提交 ${sha} 找不到`);
+      else {
+        const changed = diff.stdout.split('\n').filter(Boolean).length;
+        if (changed >= MAP_STALE_FILES) out.push(`地图核对（${sha.slice(0, 7)}）以来改了 ${changed} 个文件，可能过期`);
+      }
+    } else out.push('地图没写「最后核对：提交号」');
+  }
+  const invariants = readInvariants(root);
+  const broken = tableProblems(root, invariants);
+  if (broken.length) out.push(`不变量表：${broken.slice(0, 2).join('；')}${broken.length > 2 ? ` 等 ${broken.length} 处` : ''}`);
+  const baseline = readBaseline(root);
+  const noBase = invariants.filter((row) => row['指纹'] && !(row.ID in baseline)).map((row) => row.ID);
+  if (noBase.length) out.push(`${noBase.length} 条不变量还没记基线：${noBase.slice(0, 4).join('、')}（invariants.mjs baseline）`);
+  return out;
 }
 
 function selfTest() {
@@ -160,6 +202,54 @@ function selfTest() {
       writeFileSync(resolve(full, 'docs/tasks/2026-11-06-ex.md'), card('done') + '\n校验豁免：演示\n');
       const line = foundationWarnings(full, new Date(2026, 10, 8)).join('\n');
       assert.match(line, /1 张卡超过 1KB/); assert.match(line, /交付校验豁免 1 张卡/);
+    });
+    const sys = repo('system');
+    const commit = (msg) => { assert.equal(git(sys, ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', msg]).status, 0); return git(sys, ['rev-parse', 'HEAD']).stdout.trim(); };
+    track(sys, 'server/app.py', 'def stage(o):\n    return o.status == "voided"\n');
+    track(sys, 'web/page.tsx', 'x\n');
+    track(sys, 'docs/a.md', 'x\n');
+    writeFileSync(resolve(sys, '.harness.json'), '{}');
+    writeFileSync(resolve(sys, 'AGENTS.md'), 'a\n'); writeFileSync(resolve(sys, 'DECISIONS.md'), 'd\n');
+    mkdirSync(resolve(sys, 'docs/tasks'), { recursive: true });
+    const head = commit('init');
+    const system = (mapRows, extra = '', invRows = []) => writeFileSync(resolve(sys, SYSTEM_FILE), ['## 不变量', '', '| ID | 业务含义 | 权威实现 | 指纹 | 消费者怎么查 | 联动测试 | 例外与到期 |', '|---|---|---|---|---|---|---|', ...invRows, '', '## 系统地图', '', extra, '', '| 模块 | 路径 | 职责 | 决定者 | 外部依赖 |', '|---|---|---|---|---|', ...mapRows, ''].join('\n'));
+    check('没有 SYSTEM.md 不报地图', () => assert.doesNotMatch(foundationWarnings(sys).join('\n'), /地图/));
+    check('纯文档仓接入了也不报地图', () => {
+      const docs = repo('docs-linked');
+      track(docs, 'notes.md', '# x\n');
+      writeFileSync(resolve(docs, '.harness.json'), '{}');
+      writeFileSync(resolve(docs, 'AGENTS.md'), 'a\n'); writeFileSync(resolve(docs, 'DECISIONS.md'), 'd\n');
+      mkdirSync(resolve(docs, 'docs/tasks'), { recursive: true });
+      writeFileSync(resolve(docs, SYSTEM_FILE), '## 系统地图\n');
+      assert.deepEqual(foundationWarnings(docs), []);
+    });
+    check('地图空：提示起草', () => {
+      system([], `最后核对：${head}`);
+      assert.match(foundationWarnings(sys).join('\n'), /系统地图还没写/);
+    });
+    check('地图齐全且新：不报', () => {
+      system(['| 服务 | `server/` | 业务 | — | — |', '| 前端 | web | 页面 | — | — |'], `最后核对：${head}`);
+      assert.deepEqual(foundationWarnings(sys), []);
+    });
+    check('路径不存在、顶层目录没登记、没写最后核对', () => {
+      system(['| 服务 | `server/`、`worker/` | 业务 | — | — |']);
+      const line = foundationWarnings(sys).join('\n');
+      assert.match(line, /地图里的路径不存在：worker/); assert.match(line, /地图没登记的顶层目录：web/); assert.match(line, /没写「最后核对/);
+      assert.doesNotMatch(line, /没登记的顶层目录：.*docs/);
+    });
+    check('核对以来改动过多、提交号找不到', () => {
+      for (let i = 0; i < 30; i++) track(sys, `server/m${i}.py`, `x = ${i}\n`);
+      commit('many');
+      system(['| 服务 | server | 业务 | — | — |', '| 前端 | web | 页面 | — | — |'], `最后核对：${head}`);
+      assert.match(foundationWarnings(sys).join('\n'), /以来改了 30 个文件，可能过期/);
+      system(['| 服务 | server | 业务 | — | — |', '| 前端 | web | 页面 | — | — |'], '最后核对：deadbeef');
+      assert.match(foundationWarnings(sys).join('\n'), /deadbeef 找不到/);
+    });
+    check('不变量表有问题、没记基线都报', () => {
+      const now = git(sys, ['rev-parse', 'HEAD']).stdout.trim();
+      system(['| 服务 | server | 业务 | — | — |', '| 前端 | web | 页面 | — | — |'], `最后核对：${now}`, ['| INV-01 | 作废 | server/app.py#stage | `voided` | — | — | — |', '| INV-02 | 坏 | server/none.py#f | — | — | — | — |']);
+      const line = foundationWarnings(sys).join('\n');
+      assert.match(line, /不变量表：INV-02：权威实现 server\/none\.py 不存在/); assert.match(line, /1 条不变量还没记基线：INV-01/);
     });
   } finally { rmSync(tmp, { recursive: true, force: true }); }
   console.log(`地基检查自测：${count} 项通过`);
