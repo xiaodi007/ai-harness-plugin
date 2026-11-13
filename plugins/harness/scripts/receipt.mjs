@@ -70,7 +70,7 @@ export function anomalies(exit, counts, output) {
   return out;
 }
 
-function stamp(date) {
+export function stamp(date) {
   const p = (n) => String(n).padStart(2, '0');
   return `${p(date.getMonth() + 1)}${p(date.getDate())}-${p(date.getHours())}${p(date.getMinutes())}`;
 }
@@ -89,13 +89,25 @@ function repoRoot(cwd) {
   return top.status === 0 && top.stdout.trim() ? top.stdout.trim() : cwd;
 }
 
-export function writeReceipt(root, receipt) {
-  const dir = resolve(root, RECEIPT_DIR);
+// .harness/ 下的子目录；第一次建时写 .gitignore（只放过基线文件），回执、变异记录、测试锁日志都不进库。
+export function harnessDir(root, sub) {
+  const dir = resolve(root, '.harness', sub);
   mkdirSync(dir, { recursive: true });
   const ignore = resolve(root, '.harness/.gitignore');
   if (!existsSync(ignore)) writeFileSync(ignore, '*\n!.gitignore\n!invariants-baseline.json\n');
+  return dir;
+}
+
+export function writeReceipt(root, receipt) {
+  const dir = harnessDir(root, 'receipts');
   writeFileSync(resolve(dir, `${receipt.id}.json`), JSON.stringify(receipt, null, 2) + '\n');
 }
+
+// 跑回执的会话：HARNESS_SESSION_ID（手动或别的 agent 指定）优先，其次 Claude Code 给 Bash 的 CLAUDE_CODE_SESSION_ID；都没有记 null。
+export function sessionId(env = process.env) {
+  return env.HARNESS_SESSION_ID || env.CLAUDE_CODE_SESSION_ID || null;
+}
+
 
 // 跑命令：输出原样转给终端，同时留尾部和用于解析的正文。
 export function run(argv, { cwd = process.cwd(), expectFail = false, quiet = false } = {}) {
@@ -122,6 +134,7 @@ export function run(argv, { cwd = process.cwd(), expectFail = false, quiet = fal
         head: head.status === 0 ? head.stdout.trim() : null,
         dirty: dirty.status === 0 ? Boolean(dirty.stdout.trim()) : null,
         startedAt: started.toISOString(), endedAt: ended.toISOString(), durationMs: ended - started,
+        session: sessionId(),
         exit, signal: signal ?? null, error: error ? String(error.message ?? error) : null,
         counts, anomalies: error ? [`命令没能启动：${error.code ?? error.message}`] : anomalies(exit, counts, body), expectFail,
         runtime: { node: process.version, platform: process.platform },
@@ -136,12 +149,21 @@ export function run(argv, { cwd = process.cwd(), expectFail = false, quiet = fal
   });
 }
 
+export function loadReceipt(root, id) {
+  try { return JSON.parse(readFileSync(resolve(root, RECEIPT_DIR, `${id}.json`), 'utf8')); } catch { return null; }
+}
+
 // 核对任务卡引用的回执：存在、退出 0、不是校准回执、跑了用例、没有异常、HEAD 是当前 HEAD 或其祖先。
-export function verifyReceipt(root, id) {
-  let receipt;
-  try { receipt = JSON.parse(readFileSync(resolve(root, RECEIPT_DIR, `${id}.json`), 'utf8')); } catch { return [`${id}：找不到回执（${RECEIPT_DIR}/${id}.json）`]; }
+// red: true 时反过来当「改动前跑红」核对：必须是 --expect-fail 回执、真的红了，而且红在用例上（不是命令没起来、不是 0 个用例）。
+export function verifyReceipt(root, id, { red = false } = {}) {
+  const receipt = loadReceipt(root, id);
+  if (!receipt) return [`${id}：找不到回执（${RECEIPT_DIR}/${id}.json）`];
   const problems = [];
-  if (receipt.expectFail) problems.push(`${id}：这是校准回执（--expect-fail），不能当通过的证据`);
+  if (red) {
+    if (!receipt.expectFail) problems.push(`${id}：不是 --expect-fail 回执，不能当改动前跑红的证据`);
+    else if (receipt.exit === 0) problems.push(`${id}：预期失败却退出 0，没红`);
+    else if (receipt.counts && !receipt.counts.failed) problems.push(`${id}：退出 ${receipt.exit} 但没有失败的用例，红的不是测试`);
+  } else if (receipt.expectFail) problems.push(`${id}：这是校准回执（--expect-fail），不能当通过的证据`);
   else if (receipt.exit !== 0) problems.push(`${id}：退出码 ${receipt.exit}，不是通过`);
   if (receipt.anomalies?.length) problems.push(`${id}：回执有异常：${receipt.anomalies.join('；')}`);
   if (receipt.head) {
@@ -218,6 +240,33 @@ async function selfTest() {
       assert.match(verifyReceipt(empty.root, empty.id).join(), /跑了 0 个用例/);
       assert.match(verifyReceipt(empty.root, 'R-0101-0000-abc').join(), /找不到回执/);
       rmSync(resolve(empty.root, RECEIPT_DIR, `${empty.id}.json`));
+    });
+    await check('回执记会话：HARNESS_SESSION_ID 优先，其次 CLAUDE_CODE_SESSION_ID，都没有为 null', async () => {
+      assert.equal(sessionId({ HARNESS_SESSION_ID: 'h', CLAUDE_CODE_SESSION_ID: 'c' }), 'h');
+      assert.equal(sessionId({ CLAUDE_CODE_SESSION_ID: 'c' }), 'c');
+      assert.equal(sessionId({}), null);
+      const saved = process.env.HARNESS_SESSION_ID;
+      process.env.HARNESS_SESSION_ID = 'sess-a';
+      try {
+        const r = await run(sh('echo "# tests 1"; echo "# pass 1"'), { cwd: repo, quiet: true });
+        assert.equal(loadReceipt(r.root, r.id).session, 'sess-a');
+        rmSync(resolve(r.root, RECEIPT_DIR, `${r.id}.json`));
+      } finally { if (saved === undefined) delete process.env.HARNESS_SESSION_ID; else process.env.HARNESS_SESSION_ID = saved; }
+    });
+    await check('当红回执核对：真红在用例上才算；退出 0、普通回执、命令没起来、0 用例都不算', async () => {
+      const red = await run(sh('echo "# tests 2"; echo "# pass 1"; echo "# fail 1"; exit 1'), { cwd: repo, quiet: true, expectFail: true });
+      assert.deepEqual(verifyReceipt(red.root, red.id, { red: true }), []);
+      const green = await run(sh('exit 1'), { cwd: repo, quiet: true, expectFail: true });
+      assert.deepEqual(verifyReceipt(green.root, green.id, { red: true }), [], '解析不出用例数时只看退出码');
+      const noRed = await run(sh('exit 0'), { cwd: repo, quiet: true, expectFail: true });
+      assert.match(verifyReceipt(noRed.root, noRed.id, { red: true }).join(), /没红/);
+      const plain = await run(sh('exit 1'), { cwd: repo, quiet: true });
+      assert.match(verifyReceipt(plain.root, plain.id, { red: true }).join(), /不是 --expect-fail 回执/);
+      const broken = await run(sh('echo "# tests 1"; echo "# pass 1"; exit 2'), { cwd: repo, quiet: true, expectFail: true });
+      assert.match(verifyReceipt(broken.root, broken.id, { red: true }).join(), /没有失败的用例/);
+      const missing = await run(['harness-no-such-command-xyz'], { cwd: repo, quiet: true, expectFail: true });
+      assert.match(verifyReceipt(missing.root, missing.id, { red: true }).join(), /没能启动/);
+      for (const r of [red, green, noRed, plain, broken, missing]) rmSync(resolve(r.root, RECEIPT_DIR, `${r.id}.json`));
     });
     await check('命令不存在：记 127 和启动失败', async () => {
       const missing = await run(['harness-no-such-command-xyz'], { cwd: repo, quiet: true });

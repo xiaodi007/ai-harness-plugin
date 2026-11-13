@@ -1,6 +1,6 @@
 {
   "methodology": "v1",
-  "templates": "0.7.0",
+  "templates": "0.8.0",
   "cardDir": "docs/tasks",
   "budgets": {
     "agentsLines": 200,
@@ -10,7 +10,17 @@
   "checks": {
     "cardOnDone": "block",
     "foundation": "warn",
-    "receipts": "cite"
+    "receipts": "cite",
+    "redGreen": "warn",
+    "testLock": "warn"
+  },
+  "testLock": {
+    "paths": ["docs/scenarios/**", ".harness/scenarios.lock.json"]
+  },
+  "mutation": {
+    "command": "",
+    "include": [],
+    "exclude": []
   },
   "optOut": false
 }

@@ -13,6 +13,8 @@ node plugins/harness/scripts/init.mjs --self-test
 node plugins/harness/scripts/invariants.mjs --self-test
 node plugins/harness/scripts/receipt.mjs --self-test
 node plugins/harness/scripts/briefs.mjs --self-test
+node plugins/harness/scripts/test-lock.mjs --self-test
+node plugins/harness/scripts/mutate.mjs --self-test
 # 每条用例都要能红：逐条打变异，对应脚本的自测必须失败。
 node scripts/mutation-check.mjs
 python3 plugins/harness/scripts/context-watch.py --self-test

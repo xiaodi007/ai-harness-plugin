@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { foundationWarnings } from './foundation.mjs';
 import { pendingBriefs } from './briefs.mjs';
+import { latestMutation, mutationLine } from './mutate.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const BOUNDARY = '只看得见经 multi-ai 记账的活；直接敲 codex 或别的机器上的活看不见';
@@ -360,7 +361,9 @@ function connected(cwd) {
     const root = probe.status === 0 && probe.stdout.trim() ? probe.stdout.trim() : cwd;
     const config = JSON.parse(readFileSync(resolve(root, '.harness.json'), 'utf8'));
     if (config.optOut) return null;
-    return { root, briefs: pendingBriefs(root) };
+    let mutation = null;
+    try { mutation = latestMutation(root); } catch { /* 读不了就不显示。 */ }
+    return { root, briefs: pendingBriefs(root), mutation };
   } catch { return null; }
 }
 
@@ -386,7 +389,8 @@ function compose(raw, { file = DEFAULT_LEDGER(), ledgerOnly = false } = {}) {
   const briefs = linked ? linked.briefs : 0;
   const notes = [...warnings.map((line) => `⚠ ${line}`), ...(briefs ? [`ℹ 上次看简报以来 ${briefs} 张卡完成：/harness:brief`] : [])];
   // 接入了的仓告诉模型工具在哪（插件升级后目录会变，不能写死进项目指令）。
-  if (linked) notes.push(`harness 工具：${TOOLS}（receipt.mjs 跑测试出回执、invariants.mjs 查不变量与消费者、briefs.mjs 汇总简报、card-check.mjs 查卡）`);
+  if (linked?.mutation) notes.push(`${mutationLine(linked.mutation)}（只是信号，不拦）`);
+  if (linked) notes.push(`harness 工具：${TOOLS}（receipt.mjs 跑测试出回执、invariants.mjs 查不变量与消费者、briefs.mjs 汇总简报、card-check.mjs 查卡、mutate.mjs 对改动文件跑变异信号）`);
   const foundation = notes.length ? clip2(`地基\n${notes.join('\n')}`, 900) + '\n\n' : '';
   // 各段分开限长，哪段再长也挤不掉别的段；地基告警放最前面。
   const output = ledgerOnly ? diagnostic + clip2(ledgerSection(file), 1600)
@@ -694,6 +698,13 @@ function selfTest() {
       writeFileSync(resolve(repo.root, 'docs/tasks/2026-11-08-x.md'), '# x\n\n- 状态：done\n');
       const after = JSON.parse(hookOutput(JSON.stringify({ cwd: repo.root }), { file }));
       assert.match(after.systemMessage, /^ℹ 上次看简报以来 1 张卡完成：\/harness:brief\n回到现场/);
+      assert.doesNotMatch(after.hookSpecificOutput.additionalContext, /变异信号 M-/);
+      mkdirSync(resolve(repo.root, '.harness/mutation'), { recursive: true });
+      const record = { id: 'M-1113-0900-abc', endedAt: '2026-11-13T09:05:00.000Z', files: ['src/a.py'], exit: 0, counts: { killed: 3, timeout: 0, survived: 1, noCoverage: 0, errors: 0 }, score: 75 };
+      writeFileSync(resolve(repo.root, '.harness/mutation/M-1113-0900-abc.json'), JSON.stringify(record));
+      const withMutation = JSON.parse(hookOutput(JSON.stringify({ cwd: repo.root }), { file }));
+      assert.match(withMutation.hookSpecificOutput.additionalContext, /\n变异信号 M-1113-0900-abc（11-13，1 个改动文件）：分数 75%，存活 1，杀死 3（只是信号，不拦）\n/);
+      assert.doesNotMatch(withMutation.systemMessage, /变异/);
     });
     console.log(`session-start：${count} 个场景通过（均含负向断言）`);
   } finally { rmSync(tmp, { recursive: true, force: true }); }

@@ -169,11 +169,11 @@ CARD.push(
   ['简报不查', 'for (const name of BRIEF) {', 'for (const name of []) {'],
   ['不查引用的不变量', 'if (cited.length) problems.push(...checkInvariants(', 'if (false) problems.push(...checkInvariants('],
   ['任意编号都当不变量', ".filter((id) => prefixes.has(id.replace(/-\\d+$/, '')))", ''],
-  ['回执不核对', 'for (const id of ids) problems.push(...verifyReceipt(', 'for (const id of []) problems.push(...verifyReceipt('],
+  ['回执不核对', 'problems.push(...verifyReceipt(root, id, { red }).map(', '[].push(...verifyReceipt(root, id, { red }).map('],
   ['require 不要求回执', "if (!ids.length && mode === 'require' && !/人工\\s*[:：]/.test(line))", 'if (false)'],
   ['人工不算', "&& !/人工\\s*[:：]/.test(line))", ')'],
   ['off 也查回执', "if (mode !== 'off') {", 'if (true) {'],
-  ['Stop 不查仓库上下文', 'const problems = checkCardInRepo(text, root, config);', 'const problems = checkCard(text);'],
+  ['Stop 不查仓库上下文', 'const problems = checkCardInRepo(text, root, config, warnings);', 'const problems = checkCard(text);'],
 );
 
 FOUNDATION.push(
@@ -192,11 +192,78 @@ FOUNDATION.push(
 SESSION.push(
   ['不报待看简报', '...(briefs ? [`ℹ 上次看简报以来 ${briefs} 张卡完成：/harness:brief`] : [])];\n  return', '];\n  return'],
   ['不给工具目录', 'if (linked) notes.push(`harness 工具', 'if (false) notes.push(`harness 工具'],
-  ['optOut 也算接入', 'if (config.optOut) return null;\n    return { root', 'return { root'],
+  ['optOut 也算接入', 'if (config.optOut) return null;\n    let mutation = null;', 'let mutation = null;'],
 );
 
+// 0.8.0：测试锁、红绿回执、变异信号。
+RECEIPT.push(
+  ['不记会话', 'session: sessionId(),', 'session: null,'],
+  ['会话不优先 HARNESS_SESSION_ID', 'env.HARNESS_SESSION_ID || env.CLAUDE_CODE_SESSION_ID', 'env.CLAUDE_CODE_SESSION_ID || env.HARNESS_SESSION_ID'],
+  ['红回执不要求 expect-fail', 'if (!receipt.expectFail) problems.push(`${id}：不是 --expect-fail', 'if (false) problems.push(`${id}：不是 --expect-fail'],
+  ['红回执退出 0 也算', 'else if (receipt.exit === 0) problems.push(`${id}：预期失败却退出 0', 'else if (false) problems.push(`${id}：预期失败却退出 0'],
+  ['红回执不看失败用例', 'else if (receipt.counts && !receipt.counts.failed)', 'else if (false)'],
+);
+
+CARD.push(
+  ['红绿不只管根因修复', "  if (!(field(map, '同类扫描', '判定') ?? '').includes('根因修复')) return [];\n", ''],
+  ['红绿不认不适用', "if (lines.some((line) => filled(line.match(RED_GREEN_NA)?.[1] ?? ''))) return [];", 'if (false) return [];'],
+  ['红绿不认占位', "filled(line.match(RED_GREEN_NA)?.[1] ?? '')", "Boolean(line.match(RED_GREEN_NA))"],
+  ['红绿不要求同一条命令', '.filter((green) => commandKey(green.receipt) === commandKey(red.receipt))', ''],
+  ['红回执不当红核对', 'verifyReceipt(root, red.id, { red: true })', 'verifyReceipt(root, red.id)'],
+  ['同一提交都干净不报', 'if (r.head && r.head === g.head && r.dirty === false && g.dirty === false)', 'if (false)'],
+  ['多对只看第一对', '    if (!problems.length) return [];\n    first ??= problems;', '    return problems;'],
+  ['红绿 warn 也拦', "if (redGreenMode === 'require') problems.push(...found);", 'problems.push(...found);'],
+  ['红绿 off 也查', "if (redGreenMode !== 'off') {", 'if (true) {'],
+  ['红绿默认 require', "config.checks?.redGreen ?? 'warn'", "config.checks?.redGreen ?? 'require'"],
+  ['同行红绿也按校准报', 'const red = Boolean(own?.expectFail) && greens.includes(commandKey(own));', 'const red = false;'],
+  ['同行没有绿也按红核对', 'const red = Boolean(own?.expectFail) && greens.includes(commandKey(own));', 'const red = Boolean(own?.expectFail);'],
+  ['红绿提示每轮都响', '.filter(({ card }) => !(state.warned ?? []).includes(card))', ''],
+  ['红绿 warn 不提示', 'if (!freshNotes.length) return null;', 'return null;'],
+);
+
+const TEST_LOCK = [
+  ['工具不限', 'if (!TOOLS.has(input.tool_name)) return null;', ''],
+  ['** 只认一层', "if (glob[i + 1] === '/') { i++; out += '(?:.*/)?'; } else out += '.*';", "out += '[^/]*';"],
+  ['* 跨目录', "else if (c === '*') out += '[^/]*';", "else if (c === '*') out += '.*';"],
+  ['glob 不锚定', 'return new RegExp(`^${out}$`);', 'return new RegExp(out);'],
+  ['optOut 也管', 'if (!config || config.optOut) return null;', 'if (!config) return null;'],
+  ['没配 testLock 也管', "if (mode !== 'block' && mode !== 'warn') return null;", ''],
+  ['自定义 paths 不生效', 'config.testLock.paths : DEFAULT_LOCK', 'DEFAULT_LOCK : DEFAULT_LOCK'],
+  ['不认放行', '  if (waiver) {', '  if (false) {'],
+  ['占位也算放行', 'if (reason && !PLACEHOLDER.test(reason))', 'if (reason)'],
+  ['旧卡也算放行', 'if (now - statSync(path).mtimeMs > WAIVER_HOURS * 3600000) continue;', ''],
+  ['模板也算放行', "|| name.startsWith('_')) continue;", ') continue;'],
+  ['dropped 也算放行', "if (cardStatus(text) === 'dropped') continue;", ''],
+  ['warn 也拦', "if (mode === 'warn') {", 'if (false) {'],
+  ['放行不记日志', "log(root, { ...entry, action: 'waived'", "({ ...entry, action: 'waived'"],
+  ['统计不限 7 天', 'if (Date.parse(entry.at) >= since && entry.action in out)', 'if (entry.action in out)'],
+];
+
+const MUTATE = [
+  ['Stryker 取前 5 列', 'nums.slice(-5)', 'nums.slice(0, 5)'],
+  ['mutmut 可疑不算存活', "survived: count('🙁') + count('🤔')", "survived: count('🙁')"],
+  ['cargo 超时不算杀死', "timeout: part('timeouts?')", 'timeout: 0'],
+  ['分数不算超时', '((killed + timeout) / total)', '(killed / total)'],
+  ['报告不优先', '  if (report) return fromReport(report);\n', ''],
+  ['测试文件也交给工具', '!NOT_SOURCE.test(file)', 'true'],
+  ['不含未跟踪文件', "...(untracked.status === 0 ? untracked.stdout.split('\\n') : [])", '...[]'],
+  ['不按分叉点', "for (const branch of ['main', 'master', 'origin/main', 'origin/master'])", 'for (const branch of [])'],
+  ['{files,} 不连成一个参数', "replaceAll('{files,}', quote(files.join(',')))", "replaceAll('{files,}', files.map(quote).join(','))"],
+  ['不传 HARNESS_MUTATE_FILES', "HARNESS_MUTATE_FILES: files.join('\\n')", "HARNESS_MUTATE_FILES: ''"],
+  ['不删旧报告', '  if (reportPath) rmSync(reportPath, { force: true });\n', ''],
+  ['最近一次取第一个', 'if (!best || String(record.endedAt) > String(best.endedAt)) best = record;', 'if (!best) best = record;'],
+  ['没改动也写记录', "  if (!files.length) return { skipped:", "  if (false) return { skipped:"],
+];
+
+FOUNDATION.push(
+  ['不报测试锁放行', 'if (lock.waived) warnings.push(', 'if (false) warnings.push('],
+  ['不报测试锁 warn 命中', 'if (lock.warned) warnings.push(', 'if (false) warnings.push('],
+);
+SESSION.push(['不显示变异信号', 'if (linked?.mutation) notes.push(', 'if (false) notes.push(']);
+BRIEFS.push(['简报不带变异信号', "if (mutation) lines.push('---'", "if (false) lines.push('---'"]);
+
 const TARGETS = [['session-start.mjs', SESSION], ['card-check.mjs', CARD], ['foundation.mjs', FOUNDATION], ['init.mjs', INIT],
-  ['invariants.mjs', INVARIANTS], ['receipt.mjs', RECEIPT], ['briefs.mjs', BRIEFS]];
+  ['invariants.mjs', INVARIANTS], ['receipt.mjs', RECEIPT], ['briefs.mjs', BRIEFS], ['test-lock.mjs', TEST_LOCK], ['mutate.mjs', MUTATE]];
 
 const problems = [];
 let total = 0;

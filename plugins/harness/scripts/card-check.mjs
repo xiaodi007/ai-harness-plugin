@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { readInvariants, checkInvariants } from './invariants.mjs';
-import { verifyReceipt, writeReceipt, RECEIPT_ID } from './receipt.mjs';
+import { verifyReceipt, writeReceipt, loadReceipt, RECEIPT_ID } from './receipt.mjs';
 import { updateBaseline, SYSTEM_FILE } from './invariants.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -18,6 +18,7 @@ const EVIDENCE_LINE = new RegExp(`^\\s*[-*]\\s*\\[(${LEVELS.join('|')})\\]\\s*(.
 const FIELD_LINE = /^\s*[-*]\s*(?:\*\*)?([^：:*]+?)(?:\*\*)?\s*[:：]\s*(.*)$/;
 const STATUS_LINE = /^\s*[-*]\s*状态\s*[:：]\s*(\w+)/;
 const EXEMPT_LINE = /^\s*(?:[-*]\s*)?校验豁免\s*[:：]\s*(\S.*)$/;
+const RED_GREEN_NA = /^\s*(?:[-*]\s*)?红绿不适用\s*[:：]\s*(\S.*)$/;
 // 模板占位：<…> 整段或只有省略号。
 const PLACEHOLDER = /^<[^>]*>$|^(?:…|\.\.\.)$/;
 const MIN_SCAN = 8;
@@ -99,8 +100,41 @@ export function checkCard(text) {
 const BRIEF = ['行为变化', '决定者', '保住', '证据', '风险'];
 const RULE_ID = /\b[A-Z][A-Z0-9]*-\d+\b/g;
 
-// 内容检查之外，再对着仓库核对：不变量引用、单写者、回执。mode 取 .harness.json 的 checks.receipts（cite / require / off）。
-export function checkCardInRepo(text, root, config = {}) {
+// 同一条命令：命令行一样，且在仓里同一个子目录下跑。
+const commandKey = (receipt) => JSON.stringify([receipt.cmd, relative(receipt.root ?? '', receipt.cwd ?? '')]);
+
+// 红-绿：判定为根因修复的卡，证据里要有同一条命令的一对回执——改动前（或回退改动后）--expect-fail 跑红，当前 HEAD（或其祖先）跑绿。
+// 只有「不带这次改动就失败」的测试，才证明它测到了这次修复。写「红绿不适用：理由」跳过。返回问题列表。
+export function redGreen(text, root) {
+  const map = sections(text);
+  if (!(field(map, '同类扫描', '判定') ?? '').includes('根因修复')) return [];
+  for (const lines of map.values()) if (lines.some((line) => filled(line.match(RED_GREEN_NA)?.[1] ?? ''))) return [];
+  const key = findSection(map, '证据');
+  const ids = [...new Set((key === undefined ? [] : map.get(key)).join('\n').match(RECEIPT_ID) ?? [])];
+  const loaded = ids.map((id) => ({ id, receipt: loadReceipt(root, id) })).filter((item) => item.receipt);
+  const reds = loaded.filter((item) => item.receipt.expectFail);
+  const greens = loaded.filter((item) => !item.receipt.expectFail);
+  const hint = '（根因修复要有同一条命令的一对回执：改动前 receipt.mjs --expect-fail 跑红、改完跑绿；跑不了写「红绿不适用：理由」）';
+  if (!reds.length && !greens.length) return [`红绿：证据里没有回执${hint}`];
+  if (!reds.length) return [`红绿：缺改动前跑红的 --expect-fail 回执${hint}`];
+  if (!greens.length) return [`红绿：缺改完跑绿的回执${hint}`];
+  const pairs = reds.flatMap((red) => greens.filter((green) => commandKey(green.receipt) === commandKey(red.receipt)).map((green) => [red, green]));
+  if (!pairs.length) return [`红绿：红、绿回执跑的不是同一条命令${hint}`];
+  let first = null;
+  for (const [red, green] of pairs) {
+    const problems = [...verifyReceipt(root, red.id, { red: true }), ...verifyReceipt(root, green.id)].map((why) => `红绿·${why}`);
+    const r = red.receipt;
+    const g = green.receipt;
+    if (r.head && r.head === g.head && r.dirty === false && g.dirty === false) problems.push(`红绿：${red.id} 与 ${green.id} 跑在同一提交且都没有未提交改动，红不是这次改动造成的（环境或偶发）`);
+    if (!problems.length) return [];
+    first ??= problems;
+  }
+  return first;
+}
+
+// 内容检查之外，再对着仓库核对：不变量引用、单写者、回执、红绿。mode 取 .harness.json 的 checks.receipts（cite / require / off）。
+// 红绿按 checks.redGreen：require 进问题列表，warn（默认）进 warnings（传了才收），off 不查。
+export function checkCardInRepo(text, root, config = {}, warnings = null) {
   const problems = checkCard(text);
   if (!root) return problems;
   const map = sections(text);
@@ -118,8 +152,20 @@ export function checkCardInRepo(text, root, config = {}) {
     for (const line of verified) {
       const ids = line.match(RECEIPT_ID) ?? [];
       if (!ids.length && mode === 'require' && !/人工\s*[:：]/.test(line)) problems.push(`回执（[已验证] 没引用回执，也没写「人工：」：${line.slice(0, 30)}）`);
-      for (const id of ids) problems.push(...verifyReceipt(root, id).map((why) => `回执·${why}`));
+      // 同一行里写成红绿一对的校准回执当「改动前跑红」核对，不按「校准回执不能当证据」报。
+      const greens = ids.map((id) => loadReceipt(root, id)).filter((r) => r && !r.expectFail).map(commandKey);
+      for (const id of ids) {
+        const own = loadReceipt(root, id);
+        const red = Boolean(own?.expectFail) && greens.includes(commandKey(own));
+        problems.push(...verifyReceipt(root, id, { red }).map((why) => `回执·${why}`));
+      }
     }
+  }
+  const redGreenMode = config.checks?.redGreen ?? 'warn';
+  if (redGreenMode !== 'off') {
+    const found = redGreen(text, root);
+    if (redGreenMode === 'require') problems.push(...found);
+    else if (warnings) warnings.push(...found);
   }
   return problems;
 }
@@ -181,18 +227,27 @@ export function stopDecision(input, now = Date.now()) {
   if (mode === 'off') return null;
   const dir = config.cardDir || 'docs/tasks';
   const failing = [];
+  const notes = [];
   for (const path of recentDoneCards(root, dir, now)) {
     const text = readFileSync(path, 'utf8');
     if (exemption(text)) continue;
-    const problems = checkCardInRepo(text, root, config);
+    const warnings = [];
+    const problems = checkCardInRepo(text, root, config, warnings);
     if (problems.length) failing.push({ card: relative(root, path), problems });
+    else if (warnings.length) notes.push({ card: relative(root, path), warnings });
   }
-  if (!failing.length) return null;
-  const describe = failing.map(({ card, problems }) => `${card}：缺 ${problems.join('、')}`).join('\n');
   const state = loadState(input.session_id);
+  // 只提示不拦的（红绿 warn）：同一张卡每会话提示一次，免得每轮 Stop 都响。
+  const freshNotes = notes.filter(({ card }) => !(state.warned ?? []).includes(card));
+  if (!failing.length) {
+    if (!freshNotes.length) return null;
+    saveState(input.session_id, { ...state, warned: [...(state.warned ?? []), ...freshNotes.map(({ card }) => card)] });
+    return { systemMessage: `harness 交付提示（不拦）：${freshNotes.map(({ card, warnings }) => `${card}：${warnings.join('、')}`).join('；')}` };
+  }
+  const describe = failing.map(({ card, problems }) => `${card}：缺 ${problems.join('、')}`).join('\n');
   const fresh = failing.filter(({ card }) => !state.blocked.includes(card));
   if (mode === 'block' && !input.stop_hook_active && fresh.length) {
-    saveState(input.session_id, { blocked: [...state.blocked, ...fresh.map(({ card }) => card)] });
+    saveState(input.session_id, { ...state, blocked: [...state.blocked, ...fresh.map(({ card }) => card)] });
     return { decision: 'block', reason: `任务卡改成 done，但交付校验没过（harness，每张卡只拦一次）：\n${describe}\n必填项补全；不变量新命中改去调权威实现或在例外列登记；回执对不上就重跑 receipt。确实不适用就在卡里写一行「校验豁免：理由」。模板见 ${dir}/_模板.md。` };
   }
   return { systemMessage: `harness 交付校验：${describe.replace(/\n/g, '；')}` };
@@ -305,6 +360,43 @@ function selfTest() {
       assert.deepEqual(checkCardInRepo(swap(evidence, '- [已验证] x —— 回执 R-1108-1530-a3f'), ctx, strict), []);
       assert.deepEqual(checkCardInRepo(swap(evidence, '- [已验证] x —— 回执 R-1108-1599-fff'), ctx, { checks: { receipts: 'off' } }), []);
     });
+    // 红绿：回执直接写进 ctx（不是 git 仓，HEAD 祖先不查），cmd、cwd 决定是不是同一条命令。
+    const rg = (id, extra = {}) => writeReceipt(ctx, { id, cmd: ['pytest', 'tests/test_x.py'], cwd: ctx, root: ctx, exit: 0, counts: { passed: 3, failed: 0, skipped: 0 }, anomalies: [], head: null, expectFail: false, ...extra });
+    rg('R-1109-0900-0a1', { expectFail: true, exit: 1, counts: { passed: 2, failed: 1, skipped: 0 } });
+    rg('R-1109-0910-0b1');
+    rg('R-1109-0920-0c1', { cmd: ['pytest'] });
+    rg('R-1109-0930-0d1', { expectFail: true, exit: 0 });
+    rg('R-1109-0940-0e1', { expectFail: true, exit: 1, counts: { passed: 2, failed: 1, skipped: 0 }, head: 'a'.repeat(40), dirty: false });
+    rg('R-1109-0950-0f1', { head: 'a'.repeat(40), dirty: false });
+    const cite = (line) => swap(evidence, `- [已验证] 修好了 —— ${line}`);
+    check('红绿：只管根因修复；没回执、只有绿、只有红、命令不同都报', () => {
+      assert.deepEqual(redGreen(swap('- 判定：根因修复', '- 判定：样例补丁，类别债已登记'), ctx), []);
+      assert.match(redGreen(good, ctx).join(), /证据里没有回执/);
+      assert.match(redGreen(cite('回执 R-1109-0910-0b1'), ctx).join(), /缺改动前跑红/);
+      assert.match(redGreen(cite('回执 R-1109-0900-0a1'), ctx).join(), /缺改完跑绿/);
+      assert.match(redGreen(cite('红 R-1109-0900-0a1 → 绿 R-1109-0920-0c1'), ctx).join(), /不是同一条命令/);
+    });
+    check('红绿：同一条命令一红一绿就过；红没红、同一提交都干净时报', () => {
+      assert.deepEqual(redGreen(cite('红 R-1109-0900-0a1 → 绿 R-1109-0910-0b1'), ctx), []);
+      assert.match(redGreen(cite('红 R-1109-0930-0d1 → 绿 R-1109-0910-0b1'), ctx).join(), /红绿·R-1109-0930-0d1：预期失败却退出 0/);
+      assert.match(redGreen(cite('红 R-1109-0940-0e1 → 绿 R-1109-0950-0f1'), ctx).join(), /同一提交且都没有未提交改动/);
+      assert.deepEqual(redGreen(cite('红 R-1109-0930-0d1、R-1109-0900-0a1 → 绿 R-1109-0910-0b1'), ctx), [], '多对里有一对站得住就算');
+      assert.deepEqual(redGreen(good + '\n红绿不适用：只改了文案，没有能跑的测试', ctx), []);
+      assert.match(redGreen(good + '\n红绿不适用：<理由>', ctx).join(), /证据里没有回执/);
+    });
+    check('红绿模式：默认 warn 只进提示；require 进缺项；off 不查', () => {
+      const warnings = [];
+      assert.deepEqual(checkCardInRepo(good, ctx, {}, warnings), []);
+      assert.match(warnings.join(), /证据里没有回执/);
+      assert.match(checkCardInRepo(good, ctx, { checks: { redGreen: 'require' } }).join(), /红绿：证据里没有回执/);
+      const off = [];
+      assert.deepEqual(checkCardInRepo(good, ctx, { checks: { redGreen: 'off' } }, off), []); assert.deepEqual(off, []);
+    });
+    check('[已验证] 同一行写成红绿一对时，红的那张不按校准回执报；单独引用照报', () => {
+      assert.deepEqual(checkCardInRepo(cite('红 R-1109-0900-0a1 → 绿 R-1109-0910-0b1'), ctx, { checks: { redGreen: 'require' } }), []);
+      assert.match(checkCardInRepo(cite('回执 R-1109-0900-0a1'), ctx).join(), /校准回执/);
+      assert.match(checkCardInRepo(cite('红 R-1109-0930-0d1 → 绿 R-1109-0910-0b1'), ctx).join(), /回执·R-1109-0930-0d1：预期失败却退出 0/);
+    });
     // Stop 钩子：在临时目录里搭仓（不需要 git，退回 cwd）。
     const repo = resolve(tmp, 'repo');
     const cards = resolve(repo, 'docs/tasks');
@@ -345,7 +437,16 @@ function selfTest() {
       writeFileSync(old, bad);
       const past = new Date(Date.now() - (STOP_WINDOW_HOURS + 1) * 3600000);
       utimesSync(old, past, past);
+      // 好卡是根因修复却没有红绿回执：默认 warn，只提示、不拦，同会话只提示一次。
+      const out = stopDecision(input({ session_id: 'clean' }));
+      assert.equal(out.decision, undefined); assert.match(out.systemMessage, /不拦）：docs\/tasks\/2026-11-08-好卡\.md：红绿/);
+      assert.doesNotMatch(out.systemMessage, /坏卡|在做|模板|README|旧卡/);
       assert.equal(stopDecision(input({ session_id: 'clean' })), null);
+      writeFileSync(resolve(repo, '.harness.json'), JSON.stringify({ checks: { cardOnDone: 'block', redGreen: 'off' } }));
+      assert.equal(stopDecision(input({ session_id: 'clean-off' })), null);
+      writeFileSync(resolve(repo, '.harness.json'), JSON.stringify({ checks: { cardOnDone: 'block' } }));
+      writeFileSync(resolve(cards, '2026-11-08-好卡.md'), good + '\n红绿不适用：演示卡，没有测试命令');
+      assert.equal(stopDecision(input({ session_id: 'clean-na' })), null);
     });
     check('archive 子目录不扫', () => {
       mkdirSync(resolve(cards, 'archive/2026-10'), { recursive: true });
@@ -403,9 +504,11 @@ if (self && process.argv.includes('--self-test')) {
     const text = readFileSync(file, 'utf8');
     const why = exemption(text);
     const root = harnessRoot(dirname(resolve(file)));
-    const problems = why ? [] : checkCardInRepo(text, root, root ? readConfig(root) ?? {} : {});
+    const warnings = [];
+    const problems = why ? [] : checkCardInRepo(text, root, root ? readConfig(root) ?? {} : {}, warnings);
     if (problems.length) red = true;
     console.log(problems.length ? `✗ ${file}：缺 ${problems.join('、')}` : `✓ ${file}${why ? `（豁免：${why}）` : ''}`);
+    for (const line of problems.length ? [] : warnings) console.log(`  ⚠ ${line}（只提示，不算红）`);
   }
   process.exit(red ? 1 : 0);
 }

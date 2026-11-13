@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { cardStatus, exemption } from './card-check.mjs';
 import { sectionTable, readInvariants, readBaseline, tableProblems, SYSTEM_FILE } from './invariants.mjs';
+import { lockStats } from './test-lock.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 export const DEFAULTS = { cardDir: 'docs/tasks', budgets: { agentsLines: 200, decisionsKB: 100, activeCards: 12, cardKB: 30 } };
@@ -78,6 +79,9 @@ export function foundationWarnings(cwd, now = new Date()) {
   if (archivable.length) warnings.push(`有 ${archivable.length} 张上月及更早的 done/dropped 卡可归档到 ${cardDir}/archive/`);
   if (big.length) warnings.push(`${big.length} 张卡超过 ${budgets.cardKB}KB，拆卡或把结论回写事实源：${big.slice(0, 3).join('、')}${big.length > 3 ? ' 等' : ''}`);
   if (exempt) warnings.push(`交付校验豁免 ${exempt} 张卡`);
+  const lock = lockStats(root, now.getTime());
+  if (lock.waived) warnings.push(`测试锁近 7 天按「改测试」放行 ${lock.waived} 次`);
+  if (lock.warned) warnings.push(`测试锁（warn）近 7 天有 ${lock.warned} 次改了锁定的测试，没拦`);
   warnings.push(...systemWarnings(root));
   return warnings;
 }
@@ -202,6 +206,15 @@ function selfTest() {
       writeFileSync(resolve(full, 'docs/tasks/2026-11-06-ex.md'), card('done') + '\n校验豁免：演示\n');
       const line = foundationWarnings(full, new Date(2026, 10, 8)).join('\n');
       assert.match(line, /1 张卡超过 1KB/); assert.match(line, /交付校验豁免 1 张卡/);
+    });
+    check('测试锁：近 7 天放行与 warn 命中各自计数，拦下的和更早的不报', () => {
+      const at = (day, action) => JSON.stringify({ at: new Date(2026, 10, day, 12).toISOString(), action });
+      mkdirSync(resolve(full, '.harness'), { recursive: true });
+      writeFileSync(resolve(full, '.harness/test-lock.jsonl'), [at(7, 'waived'), at(6, 'waived'), at(7, 'warned'), at(7, 'blocked'), at(0, 'waived')].join('\n') + '\n');
+      const line = foundationWarnings(full, new Date(2026, 10, 8)).join('\n');
+      assert.match(line, /测试锁近 7 天按「改测试」放行 2 次/); assert.match(line, /测试锁（warn）近 7 天有 1 次/);
+      rmSync(resolve(full, '.harness/test-lock.jsonl'));
+      assert.doesNotMatch(foundationWarnings(full, new Date(2026, 10, 8)).join('\n'), /测试锁/);
     });
     const sys = repo('system');
     const commit = (msg) => { assert.equal(git(sys, ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', msg]).status, 0); return git(sys, ['rev-parse', 'HEAD']).stdout.trim(); };

@@ -8,6 +8,7 @@ import { dirname, resolve, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { sections, cardStatus } from './card-check.mjs';
+import { latestMutation, mutationLine } from './mutate.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 export const BRIEF_FIELDS = ['行为变化', '决定者', '保住', '证据', '风险'];
@@ -79,6 +80,8 @@ export function render(root, since) {
     else for (const field of BRIEF_FIELDS) lines.push(`- ${field}：${b[field] || '⚠ 没写'}`);
     lines.push('');
   }
+  const mutation = latestMutation(root);
+  if (mutation) lines.push('---', `${mutationLine(mutation)}（最近一次，只是信号，不拦；node mutate.mjs 重跑）`);
   return lines.join('\n');
 }
 
@@ -115,7 +118,11 @@ function selfTest() {
       assert.ok(page.indexOf('## 没简报') < page.indexOf('## 导出'), '新的在前');
       assert.match(page, /## 没简报\n.*\n- ⚠ 这张卡没写简报/);
       assert.match(page, /## 归档[\s\S]*- 风险：⚠ 没写/);
-      assert.doesNotMatch(page, /在做|很早|模板/);
+      assert.doesNotMatch(page, /在做|很早|模板|变异/);
+      mkdirSync(resolve(repo, '.harness/mutation'), { recursive: true });
+      writeFileSync(resolve(repo, '.harness/mutation/M-1113-0900-abc.json'), JSON.stringify({ id: 'M-1113-0900-abc', endedAt: '2026-11-13T09:05:00.000Z', files: ['a'], counts: null, exit: 2 }));
+      assert.match(render(repo, now - 7 * DAY), /\n---\n变异信号 M-1113-0900-abc（11-13，1 个改动文件）：输出没解析出来/);
+      rmSync(resolve(repo, '.harness/mutation'), { recursive: true });
     });
     check('标记看过后清零，之后新完成的才算', () => {
       markSeen(repo, now);
