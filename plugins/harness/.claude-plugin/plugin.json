@@ -1,5 +1,11 @@
 {
   "name": "harness",
   "version": "0.8.0",
-  "description": "会话开场、方法论接入与地基检查、任务卡交付校验、不变量单写者检查、执行回执、变更简报、上下文收尾提醒与接力命令。"
+  "description": "会话开场、方法论接入与地基检查、任务卡交付校验、不变量单写者检查、执行回执、变更简报、上下文收尾提醒与接力命令。",
+  "author": {
+    "name": "xiaodi007"
+  },
+  "homepage": "https://github.com/xiaodi007/ai-harness-plugin",
+  "repository": "https://github.com/xiaodi007/ai-harness-plugin",
+  "license": "MIT"
 }

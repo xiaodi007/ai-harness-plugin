@@ -1,7 +1,16 @@
 {
   "name": "ai-harness",
-  "owner": { "name": "ai-harness maintainers" },
+  "owner": {
+    "name": "xiaodi007"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for disciplined multi-session AI development"
+  },
   "plugins": [
-    { "name": "harness", "source": "./plugins/harness" }
+    {
+      "name": "harness",
+      "source": "./plugins/harness",
+      "description": "Session briefing, delivery checks, test receipts and handoff discipline for long-running Claude Code projects"
+    }
   ]
 }
